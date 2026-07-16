@@ -267,7 +267,7 @@ class FTGNode(Node):
         super().__init__("ftg_node")
 
         scan_topic = self._parameter("scan_topic", "/scan")
-        drive_topic = self._parameter("drive_topic", "/ackermann_cmd")
+        drive_topic = self._parameter("drive_topic", "/drive")
 
         planner_config = FTGConfig(
             field_of_view_deg=self._positive_parameter("field_of_view_deg", 180.0),
