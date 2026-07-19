@@ -1,0 +1,36 @@
+ftg_node:
+  ros__parameters:
+    # I/O.  For f1tenth_gym_ros, drive_topic is commonly "/drive".
+    scan_topic: "/scan"
+    drive_topic: "/ackermann_cmd"
+
+    # Laser preprocessing and free-space extraction.
+    field_of_view_deg: 180.0
+    max_lidar_range: 10.0
+    min_lidar_range: 0.05
+    smoothing_window: 5
+    disparity_threshold: 0.40
+    safety_radius: 0.35
+    min_clearance: 0.45
+    min_gap_width: 0.65
+
+    # Best-point scoring inside the selected gap.
+    best_point_window: 9
+    distance_weight: 1.0
+    heading_weight: 0.35
+    gap_center_weight: 0.25
+
+    # Steering and speed control.
+    max_steering_angle: 0.42
+    steering_gain: 1.0
+    steering_smoothing: 0.35
+    max_steering_rate: 1.5
+    min_speed: 1.0
+    max_speed: 4.0
+    emergency_distance: 0.45
+    slow_distance: 2.5
+    front_sector_deg: 20.0
+    wheelbase: 0.33
+    max_lateral_accel: 4.0
+    max_accel: 2.0
+    max_decel: 5.0
