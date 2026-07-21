@@ -11,8 +11,17 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
+add_library(ftg_core src/ftg_core.cpp)
+target_compile_features(ftg_core PUBLIC cxx_std_17)
+target_include_directories(ftg_core
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
 add_executable(ftg_controller_node src/ftg_controller.cpp)
 target_compile_features(ftg_controller_node PUBLIC cxx_std_17)
+target_link_libraries(ftg_controller_node ftg_core)
 ament_target_dependencies(
   ftg_controller_node
   ackermann_msgs
@@ -21,8 +30,24 @@ ament_target_dependencies(
   std_msgs
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_ftg_core test/test_ftg_core.cpp)
+  target_link_libraries(test_ftg_core ftg_core)
+endif()
+
 install(TARGETS ftg_controller_node
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(TARGETS ftg_core
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+)
+
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 install(DIRECTORY config launch

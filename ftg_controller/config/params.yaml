@@ -1,6 +1,6 @@
 ftg_node:
   ros__parameters:
-    # I/O.  For f1tenth_gym_ros, drive_topic is commonly "/drive".
+    # Hardware I/O. The controller uses LaserScan as its only sensor input.
     scan_topic: "/scan"
     drive_topic: "/ackermann_cmd"
 
@@ -13,24 +13,34 @@ ftg_node:
     safety_radius: 0.35
     min_clearance: 0.45
     min_gap_width: 0.65
-
-    # Best-point scoring inside the selected gap.
     best_point_window: 9
-    distance_weight: 1.0
-    heading_weight: 0.35
-    gap_center_weight: 0.25
+
+    # Candidate generation and target scoring.
+    candidate_count: 21
+    depth_weight: 0.35
+    heading_weight: 0.25
+    gap_center_weight: 0.65
+    path_clearance_weight: 0.75
+    path_margin_weight: 1.0
+    continuity_weight: 0.5
+    gap_switch_hysteresis: 0.10
+
+    # Vehicle geometry and swept-path evaluation.
+    wheelbase: 0.324
+    lidar_offset: 0.275
+    min_lookahead: 0.8
+    max_lookahead: 2.0
+    path_sweep_radius: 0.35
+    path_horizon: 3.0
 
     # Steering and speed control.
-    max_steering_angle: 0.42
-    steering_gain: 1.0
-    steering_smoothing: 0.35
-    max_steering_rate: 1.5
-    min_speed: 1.0
-    max_speed: 4.0
+    nominal_scan_period: 0.004
+    steering_time_constant: 0.12
+    max_steering_angle: 0.22
+    max_steering_rate: 2.0
+    max_speed: 0.5
     emergency_distance: 0.45
-    slow_distance: 2.5
-    front_sector_deg: 20.0
-    wheelbase: 0.33
     max_lateral_accel: 4.0
     max_accel: 2.0
-    max_decel: 5.0
+    max_decel: 3.0
+    max_jerk: 15.0
