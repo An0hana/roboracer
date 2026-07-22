@@ -1,0 +1,7 @@
+name=MPPI-Generic
+version=0.9.0
+repository=https://github.com/ACDSLab/MPPI-Generic.git
+commit=b5c8daab6a9157ff9342d5a74838535c1b2431f7
+submodules=recursive
+license=BSD-2-Clause
+jetson_orin_cuda_arch=87
