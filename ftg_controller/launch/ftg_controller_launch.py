@@ -34,7 +34,7 @@ def generate_launch_description():
             Node(
                 package="ftg_controller",
                 executable="ftg_controller_node",
-                name="ftg_node",
+                name="ftg_controller",
                 output="screen",
                 parameters=[
                     LaunchConfiguration("params_file"),

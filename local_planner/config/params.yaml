@@ -1,0 +1,6 @@
+local_planner:
+  ros__parameters:
+    obstacles_topic: /perception/obstacles
+    odom_topic: /state_estimation/odom
+    output_topic: /planner/local_trajectory
+    trajectory_source: local_planner_placeholder

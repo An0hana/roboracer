@@ -1,0 +1,7 @@
+race_manager:
+  ros__parameters:
+    obstacles_topic: /perception/obstacles
+    odom_topic: /state_estimation/odom
+    output_topic: /race_manager/state
+    publish_rate_hz: 10.0
+    frame_id: map

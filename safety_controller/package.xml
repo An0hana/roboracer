@@ -1,23 +1,21 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>ftg_controller</name>
+  <name>safety_controller</name>
   <version>0.1.0</version>
-  <description>Adaptive Follow-the-Gap controller for F1TENTH.</description>
+  <description>Safety arbitration, swept-path AEB, watchdogs, and optional VESC command mapping.</description>
 
-  <maintainer email="maintainer@example.com">FTG Controller Maintainer</maintainer>
+  <maintainer email="maintainer@example.com">RoboRacer Team</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>ackermann_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
-  <depend>std_msgs</depend>
-
-  <exec_depend>launch</exec_depend>
-  <exec_depend>launch_ros</exec_depend>
-  <exec_depend>ament_index_python</exec_depend>
-
   <test_depend>ament_cmake_gtest</test_depend>
 
   <export>

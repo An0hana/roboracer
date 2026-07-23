@@ -20,7 +20,7 @@ class FTGNode : public rclcpp::Node
 {
 public:
   FTGNode()
-  : Node("ftg_node")
+  : Node("ftg_controller")
   {
     const std::string scan_topic = declare_parameter<std::string>("scan_topic", "/scan");
     const std::string drive_topic = declare_parameter<std::string>("drive_topic", "/drive");
