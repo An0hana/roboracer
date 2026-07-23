@@ -25,7 +25,7 @@ ScanData clearScan()
 ScanData singlePointScan(double base_x, double base_y)
 {
   ScanData scan;
-  const double lidar_x = base_x - 0.275;
+  const double lidar_x = base_x - 0.250;
   scan.ranges = {std::hypot(lidar_x, base_y)};
   scan.angle_min = std::atan2(base_y, lidar_x);
   scan.angle_increment = 0.01;

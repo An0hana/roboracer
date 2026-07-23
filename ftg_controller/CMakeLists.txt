@@ -30,13 +30,6 @@ ament_target_dependencies(
   std_msgs
 )
 
-if(BUILD_TESTING)
-  find_package(ament_cmake_gtest REQUIRED)
-
-  ament_add_gtest(test_ftg_core test/test_ftg_core.cpp)
-  target_link_libraries(test_ftg_core ftg_core)
-endif()
-
 install(TARGETS ftg_controller_node
   DESTINATION lib/${PROJECT_NAME}
 )

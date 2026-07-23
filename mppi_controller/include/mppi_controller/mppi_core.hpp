@@ -36,11 +36,11 @@ struct Control
 struct VehicleConfig
 {
   double wheelbase{0.324};
-  double length{0.568};
+  double length{0.552};
   // base_link is the rear-axle center; body longitudinal extent is
   // [-rear_overhang, length - rear_overhang].
-  double rear_overhang{0.100};
-  double width{0.296};
+  double rear_overhang{0.124};
+  double width{0.320};
   double safety_margin{0.05};
   double min_steering{-0.20};
   double max_steering{0.20};

@@ -61,11 +61,11 @@ struct SafetyConfig
   double max_command_steering{0.20};
 
   double wheelbase{0.324};
-  double vehicle_length{0.568};
-  double vehicle_width{0.296};
-  double rear_overhang{0.100};
+  double vehicle_length{0.552};
+  double vehicle_width{0.320};
+  double rear_overhang{0.124};
   double footprint_margin{0.050};
-  double lidar_offset_x{0.275};
+  double lidar_offset_x{0.250};
   double lidar_offset_y{0.0};
 
   double aeb_reaction_time{0.100};

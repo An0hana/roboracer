@@ -23,13 +23,13 @@ safety_controller:
     min_command_steering: -0.20
     max_command_steering: 0.20
 
-    # TRA6804R provisional geometry, expressed relative to the rear axle.
+    # Measured vehicle geometry, expressed relative to the rear axle.
     wheelbase: 0.324
-    vehicle_length: 0.568
-    vehicle_width: 0.296
-    rear_overhang: 0.100
+    vehicle_length: 0.552
+    vehicle_width: 0.320
+    rear_overhang: 0.124
     footprint_margin: 0.050
-    lidar_offset_x: 0.275
+    lidar_offset_x: 0.250
     lidar_offset_y: 0.0
     steering_estimation_min_speed: 0.050
     max_state_steering_angle: 0.60
