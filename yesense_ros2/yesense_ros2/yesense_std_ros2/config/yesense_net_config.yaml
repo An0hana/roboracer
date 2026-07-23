@@ -1,0 +1,16 @@
+yesense_pub:
+    ros__parameters:
+        serial_port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B31017690-if00"
+        baud_rate: 460800
+        frame_id: "gyro_link"
+        driver_type: "ros_serial"
+        imu_topic_ros: "imu/data_raw"
+        imu_topic: "imu_data"
+        device_ip: 192.168.1.200                #源ip
+        device_port: 2368                        #目的端口号
+        device_ip_difop: 192.168.1.102           #目的ip
+        difop_port: 2369                        #源端口号
+        add_multicast: false                    #是否启动组播
+        group_ip: 224.1.1.2                      #组播ip
+
+

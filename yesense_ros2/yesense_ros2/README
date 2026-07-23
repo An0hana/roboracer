@@ -1,0 +1,6 @@
+## initiating IMU
+```bash
+cd f1tenth_ws
+source /opt/ros/humble/setup.bash
+source ~/f1tenth_ws/install/setup.bash
+ros2 launch yesense_std_ros2 yesense_node.launch.py
