@@ -1,0 +1,5 @@
+opponent_tracker:
+  ros__parameters:
+    scan_topic: /scan
+    odom_topic: /state_estimation/odom
+    output_topic: /perception/obstacles

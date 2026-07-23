@@ -1,0 +1,43 @@
+safety_controller:
+  ros__parameters:
+    # All topics can be overridden by launch arguments. Only this node publishes
+    # the final vehicle command.
+    scan_topic: "/scan"
+    odom_topic: "/state_estimation/odom"
+    mppi_cmd_topic: "/control/mppi_cmd"
+    ftg_cmd_topic: "/control/ftg_cmd"
+    output_topic: "/ackermann_cmd"
+    diagnostics_topic: "/diagnostics"
+    output_frame: "base_link"
+    controller_mode: "mppi"
+    publish_rate_hz: 50.0
+
+    # A mode change is rejected unless the state is fresh and speed is below
+    # this threshold. A fault never causes an automatic controller switch.
+    switch_speed_threshold: 0.20
+    state_timeout: 0.100
+    scan_timeout: 0.150
+    command_timeout: 0.100
+    min_command_speed: 0.0
+    max_command_speed: 2.0
+    min_command_steering: -0.20
+    max_command_steering: 0.20
+
+    # TRA6804R provisional geometry, expressed relative to the rear axle.
+    wheelbase: 0.324
+    vehicle_length: 0.568
+    vehicle_width: 0.296
+    rear_overhang: 0.100
+    footprint_margin: 0.050
+    lidar_offset_x: 0.275
+    lidar_offset_y: 0.0
+    steering_estimation_min_speed: 0.050
+    max_state_steering_angle: 0.60
+
+    # Swept-rectangle AEB distance = reaction*v + v^2/(2*decel) + extra.
+    aeb_reaction_time: 0.100
+    aeb_max_deceleration: 3.0
+    aeb_extra_distance: 0.150
+    aeb_max_sweep_distance: 3.0
+    aeb_sweep_step: 0.050
+    scan_min_valid_fraction: 0.50
