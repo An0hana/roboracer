@@ -36,9 +36,9 @@ ftg_node:
     # Steering and speed control.
     nominal_scan_period: 0.004
     steering_time_constant: 0.12
-    max_steering_angle: 0.22
+    max_steering_angle: 0.32
     max_steering_rate: 2.0
-    max_speed: 0.5
+    max_speed: 1.0
     emergency_distance: 0.45
     max_lateral_accel: 4.0
     max_accel: 2.0

@@ -1,0 +1,23 @@
+## initiating cartographer
+make sure initiating IMU and Lidar before starting cartographer
+
+```bash
+cd f1tenth_ws
+source /opt/ros/humble/setup.bash
+source ~/f1tenth_ws/install/setup.bash
+ros2 launch robo_cartographer cartographer.launch.py
+```
+## starting Lidar
+```bash
+cd f1tenth_ws
+source /opt/ros/humble/setup.bash
+source ~/f1tenth_ws/install/setup.bash
+ros2 run urg_node urg_node_driver   --ros-args   -p ip_address:=192.168.0.10   -p ip_port:=10940
+```
+## foxglove bridge
+```bash
+cd f1tenth_ws
+source /opt/ros/humble/setup.bash
+source ~/f1tenth_ws/install/setup.bash
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+```
