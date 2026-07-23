@@ -53,7 +53,7 @@ x,y,v_ref,yaw,s,width_left,width_right,curvature
 
 ## 职责
 
-建图负责：
+建图。负责：
 
 - `/map`
 - `/state_estimation/odom`
