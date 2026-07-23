@@ -84,11 +84,11 @@ public:
     config.max_command_steering = declare_parameter<double>(
       "max_command_steering", 0.20);
     config.wheelbase = declare_parameter<double>("wheelbase", 0.324);
-    config.vehicle_length = declare_parameter<double>("vehicle_length", 0.568);
-    config.vehicle_width = declare_parameter<double>("vehicle_width", 0.296);
-    config.rear_overhang = declare_parameter<double>("rear_overhang", 0.100);
+    config.vehicle_length = declare_parameter<double>("vehicle_length", 0.552);
+    config.vehicle_width = declare_parameter<double>("vehicle_width", 0.320);
+    config.rear_overhang = declare_parameter<double>("rear_overhang", 0.124);
     config.footprint_margin = declare_parameter<double>("footprint_margin", 0.050);
-    config.lidar_offset_x = declare_parameter<double>("lidar_offset_x", 0.275);
+    config.lidar_offset_x = declare_parameter<double>("lidar_offset_x", 0.250);
     config.lidar_offset_y = declare_parameter<double>("lidar_offset_y", 0.0);
     config.aeb_reaction_time = declare_parameter<double>("aeb_reaction_time", 0.100);
     config.aeb_max_deceleration = declare_parameter<double>("aeb_max_deceleration", 3.0);

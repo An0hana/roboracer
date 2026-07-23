@@ -101,9 +101,9 @@ private:
     declare_parameter<int>("cuda.max_map_cells", 4 * 1024 * 1024);
 
     declare_parameter<double>("vehicle.wheelbase", 0.324);
-    declare_parameter<double>("vehicle.length", 0.568);
-    declare_parameter<double>("vehicle.rear_overhang", 0.100);
-    declare_parameter<double>("vehicle.width", 0.296);
+    declare_parameter<double>("vehicle.length", 0.552);
+    declare_parameter<double>("vehicle.rear_overhang", 0.124);
+    declare_parameter<double>("vehicle.width", 0.320);
     declare_parameter<double>("vehicle.safety_margin", 0.05);
     declare_parameter<double>("vehicle.min_steering", -0.20);
     declare_parameter<double>("vehicle.max_steering", 0.20);

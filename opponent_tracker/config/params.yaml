@@ -3,3 +3,24 @@ opponent_tracker:
     scan_topic: /scan
     odom_topic: /state_estimation/odom
     output_topic: /perception/obstacles
+    target_frame: map
+    publish_rate_hz: 50.0
+    transform_timeout: 0.005
+
+    map_topic: /map
+    use_map_filter: true
+    map_filter_radius: 0.12
+    map_occupied_threshold: 50
+    map_unknown_is_occupied: true
+
+    min_range: 0.05
+    max_range: 8.0
+    breakpoint_base: 0.06
+    breakpoint_scale: 2.0
+    min_cluster_points: 3
+
+    min_object_length: 0.05
+    max_object_length: 1.0
+    max_object_width: 0.8
+    min_box_dimension: 0.04
+    confidence_full_points: 20

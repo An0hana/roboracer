@@ -307,14 +307,14 @@ struct F1TenthCostParams : public CostParams<2>
   float map_origin_y{0.0F};
   float map_origin_cosine{1.0F};
   float map_origin_sine{0.0F};
-  float footprint_segment_length{0.568F};
-  float footprint_cover_radius{0.330F};
+  float footprint_segment_length{0.552F};
+  float footprint_cover_radius{0.319F};
 
   float dt{0.05F};
   float wheelbase{0.324F};
-  float rear_extent{-0.100F};
-  float front_extent{0.468F};
-  float half_width{0.148F};
+  float rear_extent{-0.124F};
+  float front_extent{0.428F};
+  float half_width{0.160F};
   float safety_margin{0.05F};
   float max_lateral_acceleration{4.0F};
   float barrier_distance{0.05F};

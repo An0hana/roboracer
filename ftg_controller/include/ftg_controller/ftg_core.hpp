@@ -41,10 +41,10 @@ struct FTGConfig
   double continuity_weight{0.5};
   double gap_switch_hysteresis{0.10};
 
-  double lidar_offset{0.275};
+  double lidar_offset{0.250};
   double min_lookahead{0.8};
   double max_lookahead{2.0};
-  double wheelbase{0.33};
+  double wheelbase{0.324};
   double max_steering_angle{0.42};
   double path_sweep_radius{0.35};
   double path_horizon{3.0};
@@ -130,7 +130,7 @@ private:
 
 struct CommandConfig
 {
-  double wheelbase{0.33};
+  double wheelbase{0.324};
   double max_steering_angle{0.42};
   double max_steering_rate{2.0};
   double steering_time_constant{0.12};

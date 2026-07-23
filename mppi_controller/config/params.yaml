@@ -45,9 +45,9 @@ mppi_controller:
 
     vehicle:
       wheelbase: 0.324
-      length: 0.568
-      rear_overhang: 0.100
-      width: 0.296
+      length: 0.552
+      rear_overhang: 0.124
+      width: 0.320
       safety_margin: 0.05
       min_steering: -0.20
       max_steering: 0.20
