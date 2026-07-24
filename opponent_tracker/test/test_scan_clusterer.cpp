@@ -69,6 +69,7 @@ TEST(ScanClusterer, BuildsOneFiniteOrientedBox)
   EXPECT_GE(detection.confidence, 0.0);
   EXPECT_LE(detection.confidence, 1.0);
   EXPECT_EQ(detection.point_count, 7U);
+  EXPECT_EQ(detection.points.size(), detection.point_count);
 }
 
 TEST(ScanClusterer, SeparatesClustersAcrossInvalidBeam)

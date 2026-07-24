@@ -2,7 +2,7 @@
 <package format="3">
   <name>opponent_tracker</name>
   <version>0.1.0</version>
-  <description>Single-frame LiDAR obstacle detector for RoboRacer.</description>
+  <description>LiDAR opponent detection, tracking and visualization for RoboRacer.</description>
 
   <maintainer email="maintainer@example.com">RoboRacer Team</maintainer>
   <license>Apache-2.0</license>
@@ -16,6 +16,7 @@
   <depend>sensor_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
+  <depend>visualization_msgs</depend>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
