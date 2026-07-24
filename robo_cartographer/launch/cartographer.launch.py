@@ -29,6 +29,7 @@ def generate_launch_description():
             remappings=[
                 ("scan", "/scan"),
                 ("imu", "/imu/data_raw"),
+                ("odom", "/wheel/odometry")
             ]
         ),
 
@@ -46,11 +47,7 @@ def generate_launch_description():
             package="tf2_ros",
             executable="static_transform_publisher",
             name="laser_tf",
-            arguments=[
-                "0", "0", "0",
-                "0", "0", "0",
-                "base_link",
-                "laser",
+            arguments=["0.25", "0", "0", "0", "0", "0", "base_link", "laser",
             ],
         ),
 
@@ -58,11 +55,7 @@ def generate_launch_description():
             package="tf2_ros",
             executable="static_transform_publisher",
             name="imu_tf",
-            arguments=[
-                "0", "0", "0",
-                "0", "0", "0",
-                "base_link",
-                "gyro_link",
+            arguments=["0.25", "0", "0", "0", "0", "0", "base_link", "gyro_link",
             ],
         )
     ])
