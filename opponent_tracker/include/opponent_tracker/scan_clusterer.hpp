@@ -7,6 +7,12 @@
 namespace opponent_tracker
 {
 
+struct Point2D
+{
+  double x{0.0};
+  double y{0.0};
+};
+
 struct Detection
 {
   double x{0.0};
@@ -16,12 +22,13 @@ struct Detection
   double width{0.0};
   double confidence{0.0};
   std::size_t point_count{0U};
+  std::vector<Point2D> points;
 };
 
 struct ScanClustererConfig
 {
   double min_range{0.05};
-  double max_range{8.0};
+  double max_range{15.0};
   double breakpoint_base{0.06};
   double breakpoint_scale{2.0};
   std::size_t min_cluster_points{3U};

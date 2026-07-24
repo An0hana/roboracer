@@ -120,6 +120,11 @@ bool buildDetection(
   detection.confidence = std::clamp(
     count / static_cast<double>(config.confidence_full_points), 0.0, 1.0);
   detection.point_count = cluster.size();
+  detection.points.clear();
+  detection.points.reserve(cluster.size());
+  for (const auto & sample : cluster) {
+    detection.points.push_back(Point2D{sample.x, sample.y});
+  }
   return true;
 }
 

@@ -13,8 +13,10 @@ find_package(roboracer_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 add_library(opponent_tracker_core
+  src/multi_object_tracker.cpp
   src/scan_clusterer.cpp
   src/static_map_filter.cpp
 )
@@ -38,6 +40,7 @@ ament_target_dependencies(
   sensor_msgs
   tf2
   tf2_ros
+  visualization_msgs
 )
 
 if(BUILD_TESTING)
@@ -45,6 +48,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_scan_clusterer test/test_scan_clusterer.cpp)
   target_link_libraries(test_scan_clusterer opponent_tracker_core)
+
+  ament_add_gtest(test_multi_object_tracker test/test_multi_object_tracker.cpp)
+  target_link_libraries(test_multi_object_tracker opponent_tracker_core)
 
   ament_add_gtest(test_static_map_filter test/test_static_map_filter.cpp)
   target_link_libraries(test_static_map_filter opponent_tracker_core)
