@@ -22,6 +22,11 @@ def generate_launch_description():
                 description="Full path to the FTG parameter file",
             ),
             DeclareLaunchArgument(
+                "node_name",
+                default_value="ftg_controller",
+                description="Unique ROS node name",
+            ),
+            DeclareLaunchArgument(
                 "scan_topic",
                 default_value="/scan",
                 description="LaserScan input topic",
@@ -34,7 +39,7 @@ def generate_launch_description():
             Node(
                 package="ftg_controller",
                 executable="ftg_controller_node",
-                name="ftg_controller",
+                name=LaunchConfiguration("node_name"),
                 output="screen",
                 parameters=[
                     LaunchConfiguration("params_file"),

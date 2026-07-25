@@ -1,4 +1,4 @@
-ftg_node:
+/**:
   ros__parameters:
     # Hardware I/O. The controller uses LaserScan as its only sensor input.
     scan_topic: "/scan"

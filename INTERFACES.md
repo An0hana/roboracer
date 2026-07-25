@@ -41,7 +41,7 @@ map -> odom -> base_link -> laser
 固定列顺序：
 
 ```text
-x,y,v_ref,yaw,s,width_left,width_right,curvature
+s,x,y,yaw,curvature,v_ref,width_left,width_right
 ```
 
 - 坐标系：`map`
