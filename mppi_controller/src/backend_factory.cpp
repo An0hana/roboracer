@@ -15,12 +15,22 @@ namespace mppi_controller
 // public header lets every non-CUDA consumer include mppi_core.hpp normally.
 std::unique_ptr<MppiBackend> makeMppiGenericCudaBackend(
   const MppiConfig & config, const VehicleConfig & vehicle);
+bool cudaDeviceMatchesCompiledArchitecture() noexcept;
 #endif
 
 bool cudaBackendCompiled() noexcept
 {
 #if MPPI_CONTROLLER_HAS_CUDA_BACKEND
   return true;
+#else
+  return false;
+#endif
+}
+
+bool cudaBackendDeviceCompatible() noexcept
+{
+#if MPPI_CONTROLLER_HAS_CUDA_BACKEND
+  return cudaDeviceMatchesCompiledArchitecture();
 #else
   return false;
 #endif

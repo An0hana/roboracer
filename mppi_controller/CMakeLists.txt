@@ -18,6 +18,7 @@ find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rcl_interfaces REQUIRED)
+find_package(roboracer_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -76,6 +77,8 @@ if(MPPI_CONTROLLER_ENABLE_CUDA)
   endif()
   enable_language(CUDA)
   target_sources(mppi_controller_core PRIVATE src/mppi_cuda_backend.cu)
+  target_compile_definitions(mppi_controller_core PRIVATE
+    MPPI_CONTROLLER_CUDA_ARCH=${MPPI_CONTROLLER_CUDA_ARCHITECTURE})
   target_link_libraries(mppi_controller_core PUBLIC MPPI::MPPI)
   set_target_properties(mppi_controller_core PROPERTIES
     CUDA_STANDARD 17
@@ -108,6 +111,7 @@ ament_target_dependencies(mppi_controller_node
   rclcpp
   rclcpp_lifecycle
   rcl_interfaces
+  roboracer_msgs
   tf2
   tf2_geometry_msgs
   tf2_ros

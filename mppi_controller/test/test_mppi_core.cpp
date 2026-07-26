@@ -493,5 +493,213 @@ TEST(MppiBackend, RejectsNonfiniteOrNegativeConfiguration)
     std::invalid_argument);
 }
 
+// On the radius-5 circle the raceline starts at (5, 0) heading +y. Arc
+// distance d ahead corresponds to angle d / 5.
+Obstacle circleObstacle(double arc_ahead, double radial_offset)
+{
+  const double theta = arc_ahead / 5.0;
+  const double radius = 5.0 + radial_offset;
+  Obstacle obstacle;
+  obstacle.x = radius * std::cos(theta);
+  obstacle.y = radius * std::sin(theta);
+  obstacle.yaw = normalizeAngle(theta + kPi * 0.5);
+  obstacle.half_length = 0.15;
+  obstacle.half_width = 0.10;
+  return obstacle;
+}
+
+TEST(Obstacle, ClearanceIsConservativeAndExtrapolatesMotion)
+{
+  const VehicleConfig vehicle;
+  const State state{0.0, 0.0, 0.0, 1.0, 0.0};
+  EXPECT_TRUE(std::isinf(obstacleClearance(state, vehicle, nullptr, 0.0)));
+  const std::vector<Obstacle> none;
+  EXPECT_TRUE(std::isinf(obstacleClearance(state, vehicle, &none, 0.0)));
+
+  Obstacle ahead;
+  ahead.x = 2.0;
+  ahead.half_length = 0.2;
+  ahead.half_width = 0.1;
+  const std::vector<Obstacle> static_obstacle{ahead};
+  // Exact rectangle gap: vehicle front 0.428, obstacle rear 1.8.
+  const double exact_gap = 1.372;
+  const double reported = obstacleClearance(state, vehicle, &static_obstacle, 0.0);
+  EXPECT_LE(reported, exact_gap);
+  EXPECT_GE(reported, exact_gap - 0.25);
+
+  Obstacle approaching = ahead;
+  approaching.vx = -1.0;
+  const std::vector<Obstacle> moving{approaching};
+  Obstacle shifted = ahead;
+  shifted.x = 1.5;
+  const std::vector<Obstacle> equivalent{shifted};
+  EXPECT_NEAR(
+    obstacleClearance(state, vehicle, &moving, 0.5),
+    obstacleClearance(state, vehicle, &equivalent, 0.0), 1.0e-12);
+}
+
+TEST(Cost, DistinguishesDepartingFromMergingObstacle)
+{
+  const RaceLine track = makeCircle(false, 2.0);
+  MppiConfig config = fastConfig();
+  config.horizon_steps = 20U;
+  CpuMppiBackend backend(config, VehicleConfig{});
+  const State initial{5.0, 0.0, kPi * 0.5, 1.2, std::atan(0.324 / 5.0)};
+  const std::vector<Control> follow(config.horizon_steps, Control{});
+  const double arrival_time = 1.0 / 1.2;
+
+  // Departing: currently dead ahead on the path, but leaving it fast. A
+  // static treatment would flag this as a collision.
+  Obstacle departing = circleObstacle(1.0, 0.0);
+  departing.vx = 2.0 * std::cos(1.0 / 5.0);
+  departing.vy = 2.0 * std::sin(1.0 / 5.0);
+  const std::vector<Obstacle> departing_set{departing};
+  const CostBreakdown departing_cost = backend.evaluateTrajectory(
+    initial, follow, track, nullptr, nullptr, &departing_set);
+  EXPECT_EQ(departing_cost.collision, 0.0);
+
+  // Merging: currently clear of the path, but timed to reach the vehicle's
+  // arrival point exactly when the vehicle does. A static treatment would
+  // call this safe.
+  const double offset = 0.8;
+  Obstacle merging = circleObstacle(1.0, offset);
+  merging.vx = -(offset / arrival_time) * std::cos(1.0 / 5.0);
+  merging.vy = -(offset / arrival_time) * std::sin(1.0 / 5.0);
+  const std::vector<Obstacle> merging_set{merging};
+  const CostBreakdown merging_cost = backend.evaluateTrajectory(
+    initial, follow, track, nullptr, nullptr, &merging_set);
+  EXPECT_GT(merging_cost.collision, 0.0);
+
+  Obstacle merging_static = merging;
+  merging_static.vx = 0.0;
+  merging_static.vy = 0.0;
+  const std::vector<Obstacle> static_set{merging_static};
+  const CostBreakdown static_cost = backend.evaluateTrajectory(
+    initial, follow, track, nullptr, nullptr, &static_set);
+  EXPECT_EQ(static_cost.collision, 0.0);
+}
+
+TEST(Cost, ObstacleMeasurementAgeShiftsExtrapolation)
+{
+  const RaceLine track = makeCircle(false, 2.0);
+  MppiConfig config = fastConfig();
+  config.horizon_steps = 20U;
+  CpuMppiBackend backend(config, VehicleConfig{});
+  const State initial{5.0, 0.0, kPi * 0.5, 1.2, std::atan(0.324 / 5.0)};
+  const std::vector<Control> follow(config.horizon_steps, Control{});
+
+  Obstacle stale = circleObstacle(1.0, 0.6);
+  stale.vx = -1.0 * std::cos(1.0 / 5.0);
+  stale.vy = -1.0 * std::sin(1.0 / 5.0);
+  stale.time_offset = 0.1;
+  const std::vector<Obstacle> stale_set{stale};
+
+  Obstacle compensated = stale;
+  compensated.x += stale.vx * 0.1;
+  compensated.y += stale.vy * 0.1;
+  compensated.time_offset = 0.0;
+  const std::vector<Obstacle> compensated_set{compensated};
+
+  const CostBreakdown stale_cost = backend.evaluateTrajectory(
+    initial, follow, track, nullptr, nullptr, &stale_set);
+  const CostBreakdown compensated_cost = backend.evaluateTrajectory(
+    initial, follow, track, nullptr, nullptr, &compensated_set);
+  EXPECT_NEAR(stale_cost.total(), compensated_cost.total(), 1.0e-9);
+  EXPECT_EQ(stale_cost.collision, compensated_cost.collision);
+}
+
+TEST(CpuMppi, SwervesAroundStaticObstacleOnRaceLine)
+{
+  const RaceLine track = makeCircle(false, 2.0);
+  MppiConfig config = fastConfig();
+  config.horizon_steps = 30U;
+  config.random_seed = 42U;
+  CpuMppiBackend backend(config, VehicleConfig{});
+
+  // 1.8 m ahead keeps the deterministic braking rollouts feasible (stopping
+  // needs ~1.15 m including body length and cover slack), so the sampler
+  // always has a valid fallback while it discovers the swerve. Slightly
+  // off-center so left/right avoidance rollouts cannot cancel each other out
+  // in the importance-weighted average.
+  const std::vector<Obstacle> obstacles{circleObstacle(1.8, 0.15)};
+  MppiRequest request;
+  request.initial_state = State{5.0, 0.0, kPi * 0.5, 1.2, std::atan(0.324 / 5.0)};
+  request.race_line = &track;
+  request.obstacles = &obstacles;
+
+  // Receding-horizon warm starts from a fixed state; the sampler must
+  // converge onto an avoiding sequence within a few iterations.
+  MppiResult result;
+  for (int iteration = 0; iteration < 5; ++iteration) {
+    result = backend.compute(request);
+    if (result.valid) {
+      break;
+    }
+  }
+  ASSERT_TRUE(result.valid) << result.reason;
+  EXPECT_EQ(result.cost.collision, 0.0);
+  EXPECT_GT(result.metrics.minimum_obstacle_clearance, 0.0);
+  // The solution must keep racing, not just slam the brakes.
+  EXPECT_GT(result.metrics.forward_progress, 0.3);
+
+  // The same scenario without the obstacle must not report obstacle
+  // clearance, proving the metric actually came from the obstacle input.
+  backend.reset();
+  MppiRequest empty_request = request;
+  empty_request.obstacles = nullptr;
+  const MppiResult unobstructed = backend.compute(empty_request);
+  ASSERT_TRUE(unobstructed.valid) << unobstructed.reason;
+  EXPECT_TRUE(std::isinf(unobstructed.metrics.minimum_obstacle_clearance));
+}
+
+TEST(CudaMppi, AvoidsObstaclesWithCpuValidatedSafety)
+{
+  if (!cudaBackendCompiled()) {
+    GTEST_SKIP() << "CUDA backend not compiled";
+  }
+  if (!cudaBackendDeviceCompatible()) {
+    // The vendor kernels abort the whole process on an architecture-mismatched
+    // launch, so this must be a skip, not a runtime failure path.
+    GTEST_SKIP() << "no CUDA device matching the compiled architecture";
+  }
+  MppiConfig config;  // Defaults match the compiled 2048 x 48 CUDA shape.
+  config.random_seed = 42U;
+  std::unique_ptr<MppiBackend> backend;
+  try {
+    backend = makeBackend("cuda", config, VehicleConfig{});
+  } catch (const std::exception & exception) {
+    GTEST_SKIP() << "CUDA backend unavailable: " << exception.what();
+  }
+  const RaceLine track = makeCircle(false, 2.0);
+  if (!backend->warmup(track, nullptr)) {
+    GTEST_SKIP() << "no usable CUDA device for warmup";
+  }
+  backend->reset();
+
+  const std::vector<Obstacle> obstacles{circleObstacle(1.8, 0.15)};
+  MppiRequest request;
+  request.initial_state = State{5.0, 0.0, kPi * 0.5, 1.2, std::atan(0.324 / 5.0)};
+  request.race_line = &track;
+  request.obstacles = &obstacles;
+
+  MppiResult result;
+  for (int iteration = 0; iteration < 8; ++iteration) {
+    result = backend->compute(request);
+    if (result.valid && result.reason == "ok") {
+      break;
+    }
+  }
+  // Cost and metrics of the returned trajectory come from the CPU validator,
+  // so these assertions certify the CUDA proposal against the reference
+  // safety model — the cross-backend consistency check.
+  ASSERT_TRUE(result.valid) << result.reason;
+  EXPECT_EQ(result.cost.collision, 0.0);
+  EXPECT_GT(result.metrics.minimum_obstacle_clearance, 0.0);
+  // A GPU cost that ignored obstacles would fail CPU validation into the
+  // braking fallback: near-zero progress and a fallback reason.
+  EXPECT_EQ(result.reason, "ok");
+  EXPECT_GT(result.metrics.forward_progress, 0.3);
+}
+
 }  // namespace
 }  // namespace mppi_controller

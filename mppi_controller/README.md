@@ -11,6 +11,26 @@ Simulation and vehicle launches default to `backend=cuda` and fail configuration
 unavailable; they never silently fall back. `cpu_reference` remains compiled only for unit
 tests, CI and numerical comparison.
 
+## Dynamic obstacles
+
+The controller subscribes to `/perception/obstacles` (`roboracer_msgs/TrackedObstacleArray`,
+map frame). Every tracked obstacle except `TRACK_BOUNDARY` enters both backends as a
+constant-velocity extrapolation: rollout step `k` evaluates the opponent at
+`t = k * dt + measurement_age`, so stale detections are pushed forward before the horizon
+even begins. Obstacle clearance shares the map's collision/CBF pipeline through a combined
+margin (the vehicle disk chain against a per-obstacle disk chain), which means the repair
+stage, the braking fallback and the final CPU safety validation all reject
+opponent-intersecting trajectories with exactly the same semantics as wall collisions.
+`obstacles_timeout` (default 0.20 s) degrades stale opponent data to costmap-only avoidance
+with a WARN diagnostic — never a stop, because an empty track legitimately publishes nothing.
+Diagnostics report `obstacle_count`, `obstacle_age_s`, `obstacles_stale` and
+`minimum_obstacle_clearance_m`. Up to `max_obstacle_count` (default 8, the compiled CUDA
+capacity) nearest obstacles are used per cycle.
+
+Local development note: the CUDA backend compiles for `sm_87` (Jetson Orin) by default.
+To run the hardware-gated CUDA tests on an Ada development GPU, rebuild with
+`--cmake-args -DMPPI_CONTROLLER_CUDA_ARCHITECTURE=89` and restore `87` before deploying.
+
 ## Race line
 
 The controller accepts exactly this CSV header:

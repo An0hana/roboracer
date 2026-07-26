@@ -26,6 +26,13 @@ mppi_controller:
     require_costmap: true
     occupied_threshold: 50
     unknown_is_occupied: false
+    # Tracked opponents enter every rollout step as constant-velocity
+    # extrapolations. Stale data degrades to costmap-only avoidance (WARN),
+    # never to a stop: an empty track legitimately publishes nothing.
+    obstacles_topic: /perception/obstacles
+    obstacles_timeout: 0.20
+    max_obstacle_count: 8
+    min_obstacle_confidence: 0.25
 
     mppi:
       rollout_count: 2048
@@ -34,7 +41,7 @@ mppi_controller:
       horizon_steps: 48
       dt: 0.05
       lambda: 1.0
-      steering_rate_stddev: 0.8
+      steering_rate_stddev: 0.5
       acceleration_stddev: 0.8
       pure_noise_fraction: 0.05
       near_obstacle_distance: 0.50
@@ -81,7 +88,7 @@ mppi_controller:
       control: 0.15
       control_change: 0.4
       lateral_acceleration: 0.25
-      boundary: 250.0
+      boundary: 600.0
       cbf: 400.0
       collision: 1000000.0
       terminal_lateral: 80.0

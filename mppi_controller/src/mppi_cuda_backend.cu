@@ -302,6 +302,8 @@ private:
   }
 };
 
+constexpr int kMaxCostObstacles = 8;
+
 struct F1TenthCostParams : public CostParams<2>
 {
   int waypoint_count{0};
@@ -327,6 +329,23 @@ struct F1TenthCostParams : public CostParams<2>
   float map_origin_sine{0.0F};
   float footprint_segment_length{0.552F};
   float footprint_cover_radius{0.319F};
+
+  // Constant-velocity obstacle set, extrapolated inside the kernel by the
+  // rollout timestep so every sample sees the opponent where it will be, not
+  // where it was measured. Disk-chain covers are precomputed on the host with
+  // the same formula the CPU reference uses.
+  int obstacle_count{0};
+  float obstacle_time_offset{0.0F};
+  float obstacle_x[kMaxCostObstacles]{};
+  float obstacle_y[kMaxCostObstacles]{};
+  float obstacle_vx[kMaxCostObstacles]{};
+  float obstacle_vy[kMaxCostObstacles]{};
+  float obstacle_cosine[kMaxCostObstacles]{};
+  float obstacle_sine[kMaxCostObstacles]{};
+  float obstacle_half_length[kMaxCostObstacles]{};
+  float obstacle_segment_length[kMaxCostObstacles]{};
+  float obstacle_cover_radius[kMaxCostObstacles]{};
+  int obstacle_segments[kMaxCostObstacles]{};
 
   float dt{0.05F};
   float wheelbase{0.324F};
@@ -371,16 +390,16 @@ public:
   }
 
   float computeStateCost(
-    const Eigen::Ref<const output_array> state, int = 0,
+    const Eigen::Ref<const output_array> state, int timestep = 0,
     int * crash_status = nullptr)
   {
-    return stateCost(state.data(), crash_status);
+    return stateCost(state.data(), timestep, crash_status);
   }
 
   __device__ float computeStateCost(
-    float * state, int = 0, float * = nullptr, int * crash_status = nullptr)
+    float * state, int timestep = 0, float * = nullptr, int * crash_status = nullptr)
   {
-    return stateCost(state, crash_status);
+    return stateCost(state, timestep, crash_status);
   }
 
   float computeControlCost(
@@ -452,6 +471,56 @@ private:
 #endif
   }
 
+  // Mirrors CpuMppiBackend/obstacleClearance: minimum disk-chain distance to
+  // every obstacle extrapolated to rollout time `time`, minus safety margin.
+  __host__ __device__ float footprintObstacleMargin(
+    const float * state, float time) const
+  {
+    if (this->params_.obstacle_count <= 0) {
+      return 1.0e6F;
+    }
+    const float yaw = state[S_IND_CLASS(F1TenthDynamicsParams, YAW)];
+    const float cosine = cosf(yaw);
+    const float sine = sinf(yaw);
+    const float horizon_time = time + this->params_.obstacle_time_offset;
+    float minimum = 1.0e6F;
+    const int segment_count = this->params_.footprint_segment_count > 0 ?
+      this->params_.footprint_segment_count : 1;
+    for (int index = 0; index < this->params_.obstacle_count &&
+      index < kMaxCostObstacles; ++index)
+    {
+      const float center_x = this->params_.obstacle_x[index] +
+        this->params_.obstacle_vx[index] * horizon_time;
+      const float center_y = this->params_.obstacle_y[index] +
+        this->params_.obstacle_vy[index] * horizon_time;
+      for (int segment = 0; segment < segment_count; ++segment) {
+        const float longitudinal = this->params_.rear_extent +
+          (static_cast<float>(segment) + 0.5F) *
+          this->params_.footprint_segment_length;
+        const float vehicle_x = state[S_IND_CLASS(F1TenthDynamicsParams, POS_X)] +
+          cosine * longitudinal;
+        const float vehicle_y = state[S_IND_CLASS(F1TenthDynamicsParams, POS_Y)] +
+          sine * longitudinal;
+        for (int piece = 0; piece < this->params_.obstacle_segments[index]; ++piece) {
+          const float offset = -this->params_.obstacle_half_length[index] +
+            (static_cast<float>(piece) + 0.5F) *
+            this->params_.obstacle_segment_length[index];
+          const float obstacle_x = center_x +
+            this->params_.obstacle_cosine[index] * offset;
+          const float obstacle_y = center_y +
+            this->params_.obstacle_sine[index] * offset;
+          const float dx = vehicle_x - obstacle_x;
+          const float dy = vehicle_y - obstacle_y;
+          minimum = fminf(
+            minimum, sqrtf(dx * dx + dy * dy) -
+            this->params_.footprint_cover_radius -
+            this->params_.obstacle_cover_radius[index]);
+        }
+      }
+    }
+    return minimum - this->params_.safety_margin;
+  }
+
   __host__ __device__ float footprintMapMargin(const float * state) const
   {
     if (this->params_.map_valid == 0) {
@@ -493,7 +562,8 @@ private:
     return best;
   }
 
-  __host__ __device__ float stateCost(const float * state, int * crash_status) const
+  __host__ __device__ float stateCost(
+    const float * state, int timestep, int * crash_status) const
   {
     if (this->params_.waypoint_count <= 0) {
       if (crash_status != nullptr) {
@@ -501,6 +571,11 @@ private:
       }
       return this->params_.weight_collision;
     }
+    // The rollout kernel evaluates cost on the post-step state with the
+    // pre-step index, so the physical rollout time is (timestep + 1) * dt —
+    // identical to the CPU reference's step convention.
+    const float rollout_time =
+      static_cast<float>(timestep + 1) * this->params_.dt;
 
     const int index = nearestWaypoint(state);
     const float reference_yaw = this->params_.waypoint_yaw[index];
@@ -541,12 +616,14 @@ private:
     const float track_margin = fminf(left_margin, right_margin);
     const float boundary_violation = fmaxf(0.0F, -track_margin);
 
-    const float map_margin = footprintMapMargin(state);
+    const float map_margin = fminf(
+      footprintMapMargin(state),
+      footprintObstacleMargin(state, rollout_time));
     const float safe_map_margin = map_margin - this->params_.barrier_distance;
     const float map_violation = fmaxf(0.0F, -safe_map_margin);
 
     float map_soft_barrier = 0.0F;
-    if (this->params_.map_valid != 0) {
+    if (this->params_.map_valid != 0 || this->params_.obstacle_count > 0) {
       const float map_barrier_argument = clampFloat(
         (this->params_.barrier_distance - map_margin) /
         fmaxf(this->params_.barrier_scale, kMinimumBarrierScale), -20.0F, 20.0F);
@@ -611,7 +688,7 @@ private:
       this->params_.waypoint_progress[index] + longitudinal_error;
     const float preview_shortfall = fmaxf(
       0.0F, this->params_.minimum_preview_distance - forward_progress);
-    return 0.5F * stateCost(state, nullptr) +
+    return 0.5F * stateCost(state, kCudaTimesteps - 1, nullptr) +
            this->params_.weight_terminal_lateral * squareFloat(lateral_error) +
            this->params_.weight_terminal_heading * squareFloat(heading_error) +
            this->params_.weight_terminal_progress * squareFloat(preview_shortfall);
@@ -879,7 +956,7 @@ public:
     }
 
     try {
-      prepareCost(request.initial_state, *request.race_line);
+      prepareCost(request.initial_state, *request.race_line, request.obstacles);
       if (launch_seed_pending_ && request.initial_state.speed <= 0.05) {
         ControllerT::control_trajectory launch_controls =
           ControllerT::control_trajectory::Zero();
@@ -930,7 +1007,7 @@ public:
       bool used_braking_fallback = false;
       if (!validator_.repairControls(
           request.initial_state, controls, *request.race_line,
-          request.distance_field, repair_deadline))
+          request.distance_field, repair_deadline, request.obstacles))
       {
         if (!selectBrakingFallback(request, controls, controls)) {
           return finish("cuda_solution_repair_failed");
@@ -942,7 +1019,7 @@ public:
       result.control = controls.front();
       result.cost = validator_.evaluateTrajectory(
         request.initial_state, controls, *request.race_line,
-        request.distance_field, &result.predicted_states);
+        request.distance_field, &result.predicted_states, request.obstacles);
       bool finite_cost = std::isfinite(result.cost.total());
       bool complete_trajectory_safe = result.cost.collision <= 0.0;
       if ((!finite_cost || !complete_trajectory_safe) &&
@@ -954,13 +1031,13 @@ public:
         result.predicted_states.clear();
         result.cost = validator_.evaluateTrajectory(
           request.initial_state, controls, *request.race_line,
-          request.distance_field, &result.predicted_states);
+          request.distance_field, &result.predicted_states, request.obstacles);
         finite_cost = std::isfinite(result.cost.total());
         complete_trajectory_safe = result.cost.collision <= 0.0;
       }
       result.metrics = validator_.trajectoryMetrics(
         request.initial_state, result.predicted_states, *request.race_line,
-        request.distance_field);
+        request.distance_field, request.obstacles);
       result.valid = finite_cost && complete_trajectory_safe;
       result.reason = !finite_cost ? "cuda_nonfinite_final_cost" :
         (complete_trajectory_safe ?
@@ -1031,13 +1108,13 @@ private:
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(repair_duration);
       if (!validator_.repairControls(
           request.initial_state, candidate, *request.race_line,
-          request.distance_field, repair_deadline))
+          request.distance_field, repair_deadline, request.obstacles))
       {
         continue;
       }
       const CostBreakdown cost = validator_.evaluateTrajectory(
         request.initial_state, candidate, *request.race_line,
-        request.distance_field);
+        request.distance_field, nullptr, request.obstacles);
       if (cost.collision <= 0.0 && std::isfinite(cost.total()) &&
         cost.total() < best_cost)
       {
@@ -1126,8 +1203,49 @@ private:
     }
   }
 
-  void prepareCost(const State & state, const RaceLine & race_line)
+  void prepareCost(
+    const State & state, const RaceLine & race_line,
+    const std::vector<Obstacle> * obstacles = nullptr)
   {
+    cost_params_.obstacle_count = 0;
+    cost_params_.obstacle_time_offset = 0.0F;
+    if (obstacles != nullptr) {
+      for (const Obstacle & obstacle : *obstacles) {
+        if (cost_params_.obstacle_count >= kMaxCostObstacles) {
+          break;
+        }
+        const int index = cost_params_.obstacle_count;
+        cost_params_.obstacle_x[index] = static_cast<float>(obstacle.x);
+        cost_params_.obstacle_y[index] = static_cast<float>(obstacle.y);
+        cost_params_.obstacle_vx[index] = static_cast<float>(obstacle.vx);
+        cost_params_.obstacle_vy[index] = static_cast<float>(obstacle.vy);
+        cost_params_.obstacle_cosine[index] =
+          static_cast<float>(std::cos(obstacle.yaw));
+        cost_params_.obstacle_sine[index] =
+          static_cast<float>(std::sin(obstacle.yaw));
+        cost_params_.obstacle_half_length[index] =
+          static_cast<float>(obstacle.half_length);
+        // Same disk-chain construction as obstacleClearance so both backends
+        // agree on what counts as contact.
+        const double obstacle_target_segment = std::max(0.02, obstacle.half_width);
+        const std::size_t obstacle_segments = std::max<std::size_t>(
+          1U, static_cast<std::size_t>(
+            std::ceil(2.0 * obstacle.half_length / obstacle_target_segment)));
+        const double obstacle_segment_length =
+          2.0 * obstacle.half_length / static_cast<double>(obstacle_segments);
+        cost_params_.obstacle_segments[index] = static_cast<int>(obstacle_segments);
+        cost_params_.obstacle_segment_length[index] =
+          static_cast<float>(obstacle_segment_length);
+        cost_params_.obstacle_cover_radius[index] = static_cast<float>(
+          std::hypot(obstacle.half_width, obstacle_segment_length * 0.5));
+        // Per-message age is identical across the array; keep the largest so
+        // a mixed set stays conservative.
+        cost_params_.obstacle_time_offset = std::max(
+          cost_params_.obstacle_time_offset,
+          static_cast<float>(obstacle.time_offset));
+        ++cost_params_.obstacle_count;
+      }
+    }
     const std::size_t nearest = race_line.nearestIndex(state.x, state.y);
     const Waypoint & initial_waypoint = race_line.waypoints()[nearest];
     const int count = static_cast<int>(std::min<std::size_t>(
@@ -1237,6 +1355,25 @@ std::unique_ptr<MppiBackend> makeMppiGenericCudaBackend(
   const MppiConfig & config, const VehicleConfig & vehicle)
 {
   return std::make_unique<MppiGenericCudaBackend>(config, vehicle);
+}
+
+#ifndef MPPI_CONTROLLER_CUDA_ARCH
+#define MPPI_CONTROLLER_CUDA_ARCH 87
+#endif
+
+bool cudaDeviceMatchesCompiledArchitecture() noexcept
+{
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count < 1) {
+    return false;
+  }
+  cudaDeviceProp properties{};
+  if (cudaGetDeviceProperties(&properties, 0) != cudaSuccess) {
+    return false;
+  }
+  // The fatbin carries SASS for exactly one architecture and the vendor
+  // kernels abort the process on a mismatched launch, so require equality.
+  return properties.major * 10 + properties.minor == MPPI_CONTROLLER_CUDA_ARCH;
 }
 
 }  // namespace mppi_controller
