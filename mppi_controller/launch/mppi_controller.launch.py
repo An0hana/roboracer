@@ -1,6 +1,12 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    RegisterEventHandler,
+    TimerAction,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessStart
 from launch.events import matches_action
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode
@@ -60,10 +66,25 @@ def generate_launch_description():
         ),
         condition=IfCondition(autostart),
     )
-    configure = EmitEvent(
-        event=ChangeState(
-            lifecycle_node_matcher=matches_action(controller),
-            transition_id=Transition.TRANSITION_CONFIGURE,
+    # Emitting CONFIGURE at description time races the node's lifecycle
+    # services and silently drops the transition on a slow start. Wait for the
+    # process, then give its services a moment to come up.
+    configure = RegisterEventHandler(
+        OnProcessStart(
+            target_action=controller,
+            on_start=[
+                TimerAction(
+                    period=2.0,
+                    actions=[
+                        EmitEvent(
+                            event=ChangeState(
+                                lifecycle_node_matcher=matches_action(controller),
+                                transition_id=Transition.TRANSITION_CONFIGURE,
+                            )
+                        )
+                    ],
+                )
+            ],
         ),
         condition=IfCondition(autostart),
     )

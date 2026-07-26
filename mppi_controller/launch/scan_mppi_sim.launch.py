@@ -15,6 +15,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     race_line_file = LaunchConfiguration("race_line_file")
     backend = LaunchConfiguration("backend")
+    params_file = LaunchConfiguration("params_file")
 
     local_costmap = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -42,6 +43,7 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
+            "params_file": params_file,
             "race_line_file": race_line_file,
             "backend": backend,
             "odom_topic": odom_topic,
@@ -63,6 +65,15 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("command_topic", default_value="/drive"),
         DeclareLaunchArgument("max_speed", default_value="0.5"),
+        DeclareLaunchArgument(
+            "params_file",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("mppi_controller"),
+                "config",
+                "params.yaml",
+            ]),
+            description="MPPI parameter YAML (tuning experiments may override)",
+        ),
         DeclareLaunchArgument("speed_weight", default_value="50.0"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument(

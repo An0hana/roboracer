@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -21,6 +22,8 @@
 #include "nav_msgs/msg/path.hpp"
 #include "mppi_controller/mppi_core.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "roboracer_msgs/msg/tracked_obstacle.hpp"
+#include "roboracer_msgs/msg/tracked_obstacle_array.hpp"
 #include "rclcpp/create_timer.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
@@ -68,6 +71,15 @@ private:
     rclcpp::Time received{0, 0, RCL_ROS_TIME};
   };
 
+  struct TimedObstacles
+  {
+    // time_offset stays zero in storage; the control tick stamps the actual
+    // measurement age into the request copy.
+    std::vector<Obstacle> obstacles;
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+    rclcpp::Time received{0, 0, RCL_ROS_TIME};
+  };
+
   void declareParameters()
   {
     declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
@@ -92,6 +104,12 @@ private:
     declare_parameter<bool>("require_costmap", true);
     declare_parameter<int>("occupied_threshold", 50);
     declare_parameter<bool>("unknown_is_occupied", false);
+    declare_parameter<std::string>("obstacles_topic", "/perception/obstacles");
+    // Stale opponent data degrades to costmap-only avoidance instead of
+    // stopping: an empty track legitimately publishes no obstacles.
+    declare_parameter<double>("obstacles_timeout", 0.20);
+    declare_parameter<int>("max_obstacle_count", 8);
+    declare_parameter<double>("min_obstacle_confidence", 0.25);
 
     declare_parameter<int>("mppi.rollout_count", 2048);
     declare_parameter<int>("mppi.horizon_steps", 48);
@@ -272,6 +290,18 @@ private:
       require_costmap_ = parameter<bool>("require_costmap");
       occupied_threshold_ = parameter<int>("occupied_threshold");
       unknown_is_occupied_ = parameter<bool>("unknown_is_occupied");
+      obstacles_topic_ = parameter<std::string>("obstacles_topic");
+      obstacles_timeout_ = parameter<double>("obstacles_timeout");
+      max_obstacle_count_ = parameter<int>("max_obstacle_count");
+      min_obstacle_confidence_ = parameter<double>("min_obstacle_confidence");
+      if (obstacles_topic_.empty() || !positive(obstacles_timeout_) ||
+        max_obstacle_count_ < 1 || max_obstacle_count_ > 64 ||
+        !std::isfinite(min_obstacle_confidence_) || min_obstacle_confidence_ < 0.0 ||
+        min_obstacle_confidence_ > 1.0)
+      {
+        error = "obstacle parameters are out of range";
+        return false;
+      }
       near_obstacle_distance_ = parameter<double>("mppi.near_obstacle_distance");
       near_obstacle_exploration_scale_ =
         parameter<double>("mppi.near_obstacle_exploration_scale");
@@ -317,6 +347,9 @@ private:
     costmap_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
       costmap_topic_, rclcpp::QoS(1).reliable(),
       std::bind(&MppiControllerNode::costmapCallback, this, std::placeholders::_1));
+    obstacles_subscription_ = create_subscription<roboracer_msgs::msg::TrackedObstacleArray>(
+      obstacles_topic_, rclcpp::QoS(1).reliable(),
+      std::bind(&MppiControllerNode::obstaclesCallback, this, std::placeholders::_1));
 
     if (!backend_->warmup(*race_line_, nullptr)) {
       RCLCPP_ERROR(
@@ -359,6 +392,7 @@ private:
     control_timer_.reset();
     odom_subscription_.reset();
     costmap_subscription_.reset();
+    obstacles_subscription_.reset();
     command_publisher_.reset();
     path_publisher_.reset();
     diagnostic_publisher_.reset();
@@ -371,6 +405,7 @@ private:
       std::lock_guard<std::mutex> lock(data_mutex_);
       latest_state_.reset();
       latest_distance_field_.reset();
+      latest_obstacles_.reset();
       last_localization_jump_time_.reset();
     }
     {
@@ -483,6 +518,62 @@ private:
     }
   }
 
+  void obstaclesCallback(const roboracer_msgs::msg::TrackedObstacleArray::SharedPtr message)
+  {
+    if (!message->header.frame_id.empty() && message->header.frame_id != map_frame_) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Rejected obstacle array in frame '%s'; expected '%s'",
+        message->header.frame_id.c_str(), map_frame_.c_str());
+      return;
+    }
+    const rclcpp::Time received = now();
+    rclcpp::Time source_stamp(message->header.stamp, get_clock()->get_clock_type());
+    if (source_stamp.nanoseconds() == 0) {
+      source_stamp = received;
+    }
+    TimedObstacles timed;
+    timed.stamp = source_stamp;
+    timed.received = received;
+    timed.obstacles.reserve(message->obstacles.size());
+    for (const auto & tracked : message->obstacles) {
+      // Track boundaries are already the costmap's job; forwarding them here
+      // would double-count walls and crowd out the limited obstacle slots.
+      if (tracked.classification ==
+        roboracer_msgs::msg::TrackedObstacle::TRACK_BOUNDARY)
+      {
+        continue;
+      }
+      const std::array<double, 7> values{{
+        tracked.x, tracked.y, tracked.yaw, tracked.vx, tracked.vy,
+        tracked.length, tracked.width}};
+      if (!std::all_of(
+          values.begin(), values.end(),
+          [](double value) {return std::isfinite(value);}) ||
+        !std::isfinite(tracked.confidence) ||
+        tracked.confidence < min_obstacle_confidence_)
+      {
+        continue;
+      }
+      Obstacle obstacle;
+      obstacle.x = tracked.x;
+      obstacle.y = tracked.y;
+      obstacle.yaw = tracked.yaw;
+      obstacle.vx = tracked.dynamic ? tracked.vx : 0.0;
+      obstacle.vy = tracked.dynamic ? tracked.vy : 0.0;
+      // Size floors keep barely-clustered detections from shrinking to a
+      // point that slips between footprint cover disks.
+      obstacle.half_length = std::max(tracked.length * 0.5, 0.10);
+      obstacle.half_width = std::max(tracked.width * 0.5, 0.10);
+      timed.obstacles.push_back(obstacle);
+      if (timed.obstacles.size() >= 64U) {
+        break;
+      }
+    }
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    latest_obstacles_ = std::move(timed);
+  }
+
   void controlTick()
   {
     const rclcpp::Time tick_time = now();
@@ -495,10 +586,12 @@ private:
     std::optional<TimedState> timed_state;
     std::optional<rclcpp::Time> localization_jump_time;
     std::optional<TimedDistanceField> timed_distance_field;
+    std::optional<TimedObstacles> timed_obstacles;
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
       timed_state = latest_state_;
       timed_distance_field = latest_distance_field_;
+      timed_obstacles = latest_obstacles_;
       localization_jump_time = last_localization_jump_time_;
     }
     if (!timed_state.has_value()) {
@@ -562,15 +655,58 @@ private:
     }
     request.race_line = &(*race_line_);
     request.distance_field = distance_field.get();
-    if (distance_field != nullptr) {
-      const double clearance = distance_field->clearance(
-        request.initial_state.x, request.initial_state.y);
-      if (std::isfinite(clearance) && clearance < near_obstacle_distance_) {
-        const double proximity = std::clamp(
-          (near_obstacle_distance_ - clearance) / near_obstacle_distance_, 0.0, 1.0);
-        request.exploration_scale = 1.0 +
-          proximity * (near_obstacle_exploration_scale_ - 1.0);
+
+    std::vector<Obstacle> request_obstacles;
+    double obstacle_age = std::numeric_limits<double>::quiet_NaN();
+    bool obstacles_stale = false;
+    if (timed_obstacles.has_value()) {
+      obstacle_age = (tick_time - timed_obstacles->stamp).seconds();
+      const double receive_age = (tick_time - timed_obstacles->received).seconds();
+      if (!std::isfinite(obstacle_age) || obstacle_age < -0.02 ||
+        obstacle_age > obstacles_timeout_ || !std::isfinite(receive_age) ||
+        receive_age < -0.02 || receive_age > obstacles_timeout_)
+      {
+        // Degrade to costmap-only avoidance rather than stopping: opponents
+        // remain visible to the costmap as untracked occupancy.
+        obstacles_stale = true;
+      } else if (!timed_obstacles->obstacles.empty()) {
+        request_obstacles = timed_obstacles->obstacles;
+        for (Obstacle & obstacle : request_obstacles) {
+          obstacle.time_offset = std::max(0.0, obstacle_age);
+        }
+        const std::size_t keep = static_cast<std::size_t>(max_obstacle_count_);
+        if (request_obstacles.size() > keep) {
+          const double ego_x = request.initial_state.x;
+          const double ego_y = request.initial_state.y;
+          std::partial_sort(
+            request_obstacles.begin(), request_obstacles.begin() + keep,
+            request_obstacles.end(),
+            [ego_x, ego_y](const Obstacle & left, const Obstacle & right) {
+              return std::hypot(left.x - ego_x, left.y - ego_y) <
+                     std::hypot(right.x - ego_x, right.y - ego_y);
+            });
+          request_obstacles.resize(keep);
+        }
+        request.obstacles = &request_obstacles;
       }
+    }
+
+    double proximity_clearance = std::numeric_limits<double>::infinity();
+    if (distance_field != nullptr) {
+      proximity_clearance = distance_field->clearance(
+        request.initial_state.x, request.initial_state.y);
+    }
+    proximity_clearance = std::min(
+      proximity_clearance,
+      obstacleClearance(request.initial_state, vehicle_, request.obstacles, 0.0));
+    if (std::isfinite(proximity_clearance) &&
+      proximity_clearance < near_obstacle_distance_)
+    {
+      const double proximity = std::clamp(
+        (near_obstacle_distance_ - proximity_clearance) / near_obstacle_distance_,
+        0.0, 1.0);
+      request.exploration_scale = 1.0 +
+        proximity * (near_obstacle_exploration_scale_ - 1.0);
     }
     MppiResult result;
     try {
@@ -606,8 +742,11 @@ private:
     publishCommand(commanded_state, result.control, tick_time);
     publishPath(result.predicted_states, tick_time);
     publishDiagnostics(
-      result.reason, diagnostic_msgs::msg::DiagnosticStatus::OK,
-      state_age, &result, costmap_age, request.exploration_scale);
+      result.reason,
+      obstacles_stale ? diagnostic_msgs::msg::DiagnosticStatus::WARN :
+      diagnostic_msgs::msg::DiagnosticStatus::OK,
+      state_age, &result, costmap_age, request.exploration_scale,
+      obstacle_age, request_obstacles.size(), obstacles_stale);
     last_commanded_steering_ = commanded_state.steering;
     last_applied_control_ = result.control;
     last_command_time_ = tick_time;
@@ -691,7 +830,9 @@ private:
     const std::string & reason, std::uint8_t level, double state_age,
     const MppiResult * result,
     double costmap_age = std::numeric_limits<double>::quiet_NaN(),
-    double exploration_scale = 1.0)
+    double exploration_scale = 1.0,
+    double obstacle_age = std::numeric_limits<double>::quiet_NaN(),
+    std::size_t obstacle_count = 0U, bool obstacles_stale = false)
   {
     if (diagnostic_publisher_ == nullptr || !diagnostic_publisher_->is_activated()) {
       return;
@@ -717,6 +858,13 @@ private:
     status.values.push_back(std::move(cuda_compiled));
     status.values.push_back(diagnosticValue("state_age_s", state_age));
     status.values.push_back(diagnosticValue("costmap_age_s", costmap_age));
+    status.values.push_back(diagnosticValue("obstacle_age_s", obstacle_age));
+    status.values.push_back(diagnosticValue(
+      "obstacle_count", static_cast<double>(obstacle_count)));
+    diagnostic_msgs::msg::KeyValue stale_value;
+    stale_value.key = "obstacles_stale";
+    stale_value.value = obstacles_stale ? "true" : "false";
+    status.values.push_back(std::move(stale_value));
     status.values.push_back(diagnosticValue("exploration_scale", exploration_scale));
     status.values.push_back(diagnosticValue(
       "output_age_s", (now() - last_output_time_).seconds()));
@@ -773,6 +921,9 @@ private:
       status.values.push_back(diagnosticValue(
         "maximum_heading_error_rad", result->metrics.maximum_heading_error));
       status.values.push_back(diagnosticValue(
+        "minimum_obstacle_clearance_m",
+        result->metrics.minimum_obstacle_clearance));
+      status.values.push_back(diagnosticValue(
         "minimum_clearance_m", result->metrics.minimum_clearance));
       status.values.push_back(diagnosticValue(
         "stopping_distance_m", result->metrics.stopping_distance));
@@ -810,6 +961,10 @@ private:
   bool require_costmap_{true};
   int occupied_threshold_{50};
   bool unknown_is_occupied_{true};
+  std::string obstacles_topic_;
+  double obstacles_timeout_{0.20};
+  int max_obstacle_count_{8};
+  double min_obstacle_confidence_{0.25};
   double near_obstacle_distance_{0.50};
   double near_obstacle_exploration_scale_{1.50};
 
@@ -817,6 +972,7 @@ private:
   std::mutex costmap_callback_mutex_;
   std::optional<TimedState> latest_state_;
   std::optional<TimedDistanceField> latest_distance_field_;
+  std::optional<TimedObstacles> latest_obstacles_;
   std::optional<rclcpp::Time> last_localization_jump_time_;
   std::optional<rclcpp::Time> last_costmap_processing_time_;
   double last_commanded_steering_{0.0};
@@ -828,6 +984,8 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_subscription_;
+  rclcpp::Subscription<roboracer_msgs::msg::TrackedObstacleArray>::SharedPtr
+    obstacles_subscription_;
   rclcpp_lifecycle::LifecyclePublisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
     command_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;

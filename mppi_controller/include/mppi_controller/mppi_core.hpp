@@ -161,6 +161,31 @@ private:
   std::vector<double> distances_;
 };
 
+// A tracked dynamic (or static) obstacle in the map frame, moved by a
+// constant-velocity model during rollouts. The position at rollout time t is
+// (x + vx * (t + time_offset), y + vy * (t + time_offset)), where time_offset
+// is the age of the measurement relative to the rollout start so that stale
+// detections are extrapolated forward before the horizon even begins.
+struct Obstacle
+{
+  double x{0.0};
+  double y{0.0};
+  double yaw{0.0};
+  double vx{0.0};
+  double vy{0.0};
+  double half_length{0.0};
+  double half_width{0.0};
+  double time_offset{0.0};
+};
+
+// Smallest distance between the vehicle body (disk-chain cover, same
+// construction as the distance-field footprint check) and any obstacle
+// rectangle extrapolated to rollout time `time`. Infinity when there are no
+// obstacles; a conservative lower bound otherwise.
+[[nodiscard]] double obstacleClearance(
+  const State & state, const VehicleConfig & vehicle,
+  const std::vector<Obstacle> * obstacles, double time);
+
 struct CostWeights
 {
   double lateral{12.0};
@@ -233,6 +258,7 @@ struct TrajectoryMetrics
   double forward_progress{0.0};
   double maximum_heading_error{0.0};
   double minimum_clearance{std::numeric_limits<double>::infinity()};
+  double minimum_obstacle_clearance{std::numeric_limits<double>::infinity()};
   double stopping_distance{0.0};
   std::size_t reverse_steps{0U};
 };
@@ -242,6 +268,9 @@ struct MppiRequest
   State initial_state{};
   const RaceLine * race_line{nullptr};
   const DistanceField * distance_field{nullptr};
+  // Obstacles already expressed in the map frame; each carries its own
+  // measurement age via Obstacle::time_offset. Null or empty means none.
+  const std::vector<Obstacle> * obstacles{nullptr};
   double exploration_scale{1.0};
 };
 
@@ -295,21 +324,28 @@ public:
   [[nodiscard]] CostBreakdown evaluateTrajectory(
     const State & initial_state, const std::vector<Control> & controls,
     const RaceLine & race_line, const DistanceField * distance_field,
-    std::vector<State> * states = nullptr) const;
+    std::vector<State> * states = nullptr,
+    const std::vector<Obstacle> * obstacles = nullptr) const;
 
   [[nodiscard]] bool repairControls(
     const State & initial_state, std::vector<Control> & controls,
     const RaceLine & race_line, const DistanceField * distance_field,
-    std::chrono::steady_clock::time_point deadline) const;
+    std::chrono::steady_clock::time_point deadline,
+    const std::vector<Obstacle> * obstacles = nullptr) const;
 
   [[nodiscard]] TrajectoryMetrics trajectoryMetrics(
     const State & initial_state, const std::vector<State> & states,
-    const RaceLine & race_line, const DistanceField * distance_field) const;
+    const RaceLine & race_line, const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles = nullptr) const;
 
 private:
+  // `time` is the rollout-relative time of `state`; obstacles are evaluated at
+  // their constant-velocity extrapolation for that instant.
   [[nodiscard]] bool stateSafe(
     const State & state, const RaceLine & race_line,
-    const DistanceField * distance_field, std::size_t * hint = nullptr) const;
+    const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles, double time,
+    std::size_t * hint = nullptr) const;
   [[nodiscard]] double footprintClearance(
     const State & state, const DistanceField * distance_field) const;
 
@@ -328,6 +364,12 @@ std::unique_ptr<MppiBackend> makeCpuBackend(
 // linked into mppi_controller.  Finding CUDA headers or the vendor package alone is
 // deliberately not treated as availability.
 [[nodiscard]] bool cudaBackendCompiled() noexcept;
+
+// True when a CUDA device is present whose compute capability can execute the
+// architecture this library was compiled for.  Guards hardware-gated tests:
+// the vendor kernels abort the process instead of failing recoverably when
+// launched on an incompatible device.
+[[nodiscard]] bool cudaBackendDeviceCompatible() noexcept;
 
 // backend may be "auto", "cuda", "cpu", or the legacy "cpu_reference".
 // "auto" prefers the compiled CUDA backend and otherwise returns the CPU

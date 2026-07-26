@@ -708,6 +708,69 @@ double CostBreakdown::total() const noexcept
          terminal_heading + terminal_progress;
 }
 
+double obstacleClearance(
+  const State & state, const VehicleConfig & vehicle,
+  const std::vector<Obstacle> * obstacles, double time)
+{
+  if (obstacles == nullptr || obstacles->empty()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  const double rear = -vehicle.rear_overhang;
+  const double half_width = vehicle.width * 0.5;
+  const double vehicle_cosine = std::cos(state.yaw);
+  const double vehicle_sine = std::sin(state.yaw);
+  const double vehicle_target_segment = std::max(0.02, half_width);
+  const std::size_t vehicle_segments = std::max<std::size_t>(
+    1U, static_cast<std::size_t>(std::ceil(vehicle.length / vehicle_target_segment)));
+  const double vehicle_segment_length =
+    vehicle.length / static_cast<double>(vehicle_segments);
+  const double vehicle_radius = std::hypot(half_width, vehicle_segment_length * 0.5);
+
+  double minimum = std::numeric_limits<double>::infinity();
+  for (const Obstacle & obstacle : *obstacles) {
+    if (!finite(obstacle.x) || !finite(obstacle.y) || !finite(obstacle.yaw) ||
+      !finite(obstacle.vx) || !finite(obstacle.vy) ||
+      !finite(obstacle.half_length) || !finite(obstacle.half_width) ||
+      !finite(obstacle.time_offset) || obstacle.half_length < 0.0 ||
+      obstacle.half_width < 0.0)
+    {
+      continue;
+    }
+    const double horizon_time = time + obstacle.time_offset;
+    const double center_x = obstacle.x + obstacle.vx * horizon_time;
+    const double center_y = obstacle.y + obstacle.vy * horizon_time;
+    const double obstacle_cosine = std::cos(obstacle.yaw);
+    const double obstacle_sine = std::sin(obstacle.yaw);
+    const double obstacle_target_segment = std::max(0.02, obstacle.half_width);
+    const std::size_t obstacle_segments = std::max<std::size_t>(
+      1U, static_cast<std::size_t>(
+        std::ceil(2.0 * obstacle.half_length / obstacle_target_segment)));
+    const double obstacle_segment_length =
+      2.0 * obstacle.half_length / static_cast<double>(obstacle_segments);
+    const double obstacle_radius =
+      std::hypot(obstacle.half_width, obstacle_segment_length * 0.5);
+    for (std::size_t vehicle_segment = 0U; vehicle_segment < vehicle_segments;
+      ++vehicle_segment)
+    {
+      const double longitudinal = rear +
+        (static_cast<double>(vehicle_segment) + 0.5) * vehicle_segment_length;
+      const double vehicle_x = state.x + vehicle_cosine * longitudinal;
+      const double vehicle_y = state.y + vehicle_sine * longitudinal;
+      for (std::size_t segment = 0U; segment < obstacle_segments; ++segment) {
+        const double offset = -obstacle.half_length +
+          (static_cast<double>(segment) + 0.5) * obstacle_segment_length;
+        const double obstacle_x = center_x + obstacle_cosine * offset;
+        const double obstacle_y = center_y + obstacle_sine * offset;
+        minimum = std::min(
+          minimum,
+          std::hypot(vehicle_x - obstacle_x, vehicle_y - obstacle_y) -
+          vehicle_radius - obstacle_radius);
+      }
+    }
+  }
+  return minimum;
+}
+
 CpuMppiBackend::CpuMppiBackend()
 {
   configure(MppiConfig{}, VehicleConfig{});
@@ -785,7 +848,7 @@ bool CpuMppiBackend::warmup(const RaceLine & race_line, const DistanceField * di
 CostBreakdown CpuMppiBackend::evaluateTrajectory(
   const State & initial_state, const std::vector<Control> & controls,
   const RaceLine & race_line, const DistanceField * distance_field,
-  std::vector<State> * states) const
+  std::vector<State> * states, const std::vector<Obstacle> * obstacles) const
 {
   CostBreakdown cost;
   State state = model_.clampState(initial_state);
@@ -794,7 +857,9 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     state, hint, config_.nearest_search_radius);
   double previous_progress = initial_projection.progress;
   double cumulative_progress = 0.0;
-  double previous_map_h = footprintClearance(state, distance_field) -
+  double previous_map_h = std::min(
+    footprintClearance(state, distance_field),
+    obstacleClearance(state, vehicle_, obstacles, 0.0)) -
     vehicle_.safety_margin - config_.repair_clearance;
   Control previous_control{};
   if (states != nullptr) {
@@ -803,16 +868,20 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     states->push_back(state);
   }
 
-  for (const Control & raw_control : controls) {
-    const Control control = model_.clampControl(raw_control);
+  for (std::size_t step = 0U; step < controls.size(); ++step) {
+    const Control control = model_.clampControl(controls[step]);
     state = model_.step(state, control, config_.dt);
+    const double time = static_cast<double>(step + 1U) * config_.dt;
     const TrackProjection projection = race_line.project(
       state, hint, config_.nearest_search_radius);
     hint = projection.index;
     const Waypoint & reference = race_line.waypoints()[hint];
     const double track_h = signedTrackMargin(state, projection, reference, vehicle_);
-    const double map_margin =
-      footprintClearance(state, distance_field) - vehicle_.safety_margin;
+    // Obstacles share the map's collision/CBF pipeline through a combined
+    // margin, so both worlds enforce identical safety semantics.
+    const double map_margin = std::min(
+      footprintClearance(state, distance_field),
+      obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
     const double map_h = map_margin - config_.repair_clearance;
     const double progress = signedProgressDelta(
       previous_progress, projection.progress, race_line.length());
@@ -840,7 +909,9 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     cost.boundary += config_.weights.boundary * square(std::max(0.0, -track_h));
     const double map_cbf = barrierViolation(previous_map_h, map_h, config_.cbf_gamma);
     double map_soft_barrier = 0.0;
-    if (distance_field != nullptr && distance_field->valid()) {
+    if ((distance_field != nullptr && distance_field->valid()) ||
+      (obstacles != nullptr && !obstacles->empty()))
+    {
       const double barrier_scale = std::max(0.02, (1.0 - config_.cbf_gamma) * 0.10);
       map_soft_barrier = barrier_scale * stableSoftplus(-map_h / barrier_scale);
     }
@@ -912,7 +983,9 @@ double CpuMppiBackend::footprintClearance(
 
 bool CpuMppiBackend::stateSafe(
   const State & state, const RaceLine & race_line,
-  const DistanceField * distance_field, std::size_t * hint) const
+  const DistanceField * distance_field,
+  const std::vector<Obstacle> * obstacles, double time,
+  std::size_t * hint) const
 {
   const std::optional<std::size_t> optional_hint = hint == nullptr ?
     std::nullopt : std::optional<std::size_t>(*hint);
@@ -921,7 +994,9 @@ bool CpuMppiBackend::stateSafe(
   if (hint != nullptr) {
     *hint = projection.index;
   }
-  const double map_margin = footprintClearance(state, distance_field) - vehicle_.safety_margin;
+  const double map_margin = std::min(
+    footprintClearance(state, distance_field),
+    obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
   return finite(state.x) && finite(state.y) && finite(state.yaw) && finite(state.speed) &&
          finite(state.steering) && map_margin >= config_.repair_clearance &&
          std::abs(projection.heading_error) <= config_.maximum_heading_error;
@@ -929,7 +1004,8 @@ bool CpuMppiBackend::stateSafe(
 
 TrajectoryMetrics CpuMppiBackend::trajectoryMetrics(
   const State & initial_state, const std::vector<State> & states,
-  const RaceLine & race_line, const DistanceField * distance_field) const
+  const RaceLine & race_line, const DistanceField * distance_field,
+  const std::vector<Obstacle> * obstacles) const
 {
   TrajectoryMetrics metrics;
   State previous_state = initial_state;
@@ -946,8 +1022,11 @@ TrajectoryMetrics CpuMppiBackend::trajectoryMetrics(
       initial_state.speed, vehicle_.max_speed, vehicle_.max_acceleration,
       static_cast<double>(predicted_steps) * config_.dt));
   metrics.maximum_heading_error = std::abs(previous_projection.heading_error);
-  metrics.minimum_clearance =
-    footprintClearance(initial_state, distance_field) - vehicle_.safety_margin;
+  metrics.minimum_obstacle_clearance =
+    obstacleClearance(initial_state, vehicle_, obstacles, 0.0) - vehicle_.safety_margin;
+  metrics.minimum_clearance = std::min(
+    footprintClearance(initial_state, distance_field) - vehicle_.safety_margin,
+    metrics.minimum_obstacle_clearance);
   metrics.stopping_distance = square(std::max(0.0, initial_state.speed)) /
     (2.0 * std::abs(vehicle_.min_acceleration));
 
@@ -957,6 +1036,11 @@ TrajectoryMetrics CpuMppiBackend::trajectoryMetrics(
     1U : 0U;
   for (std::size_t index = first_index; index < states.size(); ++index) {
     const State & state = states[index];
+    // states[first_index] is the pose after the first control step, so its
+    // rollout-relative time is one dt regardless of whether the initial pose
+    // was included in the vector.
+    const double time =
+      static_cast<double>(index - first_index + 1U) * config_.dt;
     const TrackProjection projection = race_line.project(
       state, hint, config_.nearest_search_radius);
     hint = projection.index;
@@ -967,9 +1051,15 @@ TrajectoryMetrics CpuMppiBackend::trajectoryMetrics(
       state.x - previous_state.x, state.y - previous_state.y);
     metrics.maximum_heading_error = std::max(
       metrics.maximum_heading_error, std::abs(projection.heading_error));
+    const double obstacle_margin =
+      obstacleClearance(state, vehicle_, obstacles, time) - vehicle_.safety_margin;
+    metrics.minimum_obstacle_clearance = std::min(
+      metrics.minimum_obstacle_clearance, obstacle_margin);
     metrics.minimum_clearance = std::min(
       metrics.minimum_clearance,
-      footprintClearance(state, distance_field) - vehicle_.safety_margin);
+      std::min(
+        footprintClearance(state, distance_field) - vehicle_.safety_margin,
+        obstacle_margin));
     if (progress < -config_.reverse_progress_tolerance) {
       ++metrics.reverse_steps;
     }
@@ -982,10 +1072,11 @@ TrajectoryMetrics CpuMppiBackend::trajectoryMetrics(
 bool CpuMppiBackend::repairControls(
   const State & initial_state, std::vector<Control> & controls,
   const RaceLine & race_line, const DistanceField * distance_field,
-  std::chrono::steady_clock::time_point deadline) const
+  std::chrono::steady_clock::time_point deadline,
+  const std::vector<Obstacle> * obstacles) const
 {
   if (controls.size() < config_.repair_steps || !stateSafe(
-      initial_state, race_line, distance_field))
+      initial_state, race_line, distance_field, obstacles, 0.0))
   {
     return false;
   }
@@ -999,7 +1090,8 @@ bool CpuMppiBackend::repairControls(
     for (std::size_t step = 0U; step < config_.repair_steps; ++step) {
       controls[step] = model_.clampControl(controls[step]);
       const State candidate = model_.step(state, controls[step], config_.dt);
-      if (!stateSafe(candidate, race_line, distance_field, &hint)) {
+      const double candidate_time = static_cast<double>(step + 1U) * config_.dt;
+      if (!stateSafe(candidate, race_line, distance_field, obstacles, candidate_time, &hint)) {
         all_safe = false;
         const TrackProjection projection = race_line.project(
           state, hint, config_.nearest_search_radius);
@@ -1034,7 +1126,8 @@ bool CpuMppiBackend::repairControls(
     }
     controls[step] = model_.clampControl(controls[step]);
     state = model_.step(state, controls[step], config_.dt);
-    if (!stateSafe(state, race_line, distance_field, &hint)) {
+    const double time = static_cast<double>(step + 1U) * config_.dt;
+    if (!stateSafe(state, race_line, distance_field, obstacles, time, &hint)) {
       return false;
     }
   }
@@ -1063,7 +1156,8 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
     return result;
   }
   if (!stateSafe(
-      request.initial_state, *request.race_line, request.distance_field))
+      request.initial_state, *request.race_line, request.distance_field,
+      request.obstacles, 0.0))
   {
     result.reason = "initial_state_unsafe";
     return result;
@@ -1167,7 +1261,7 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
     }
     const CostBreakdown rollout_cost = evaluateTrajectory(
       request.initial_state, rollout_controls, *request.race_line,
-      request.distance_field);
+      request.distance_field, nullptr, request.obstacles);
     if (finite(rollout_cost.total()) && rollout_cost.collision <= 0.0) {
       costs[sample] = rollout_cost.total() + importance_cost;
       rollout_valid[sample] = 1U;
@@ -1220,7 +1314,7 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
     std::chrono::duration_cast<std::chrono::steady_clock::duration>(repair_duration);
   if (!repairControls(
       request.initial_state, nominal_controls_, *request.race_line,
-      request.distance_field, repair_deadline))
+      request.distance_field, repair_deadline, request.obstacles))
   {
     result.reason = "repair_failed";
     result.solve_time_ms = std::chrono::duration<double, std::milli>(
@@ -1232,10 +1326,10 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
   result.control = nominal_controls_.front();
   result.cost = evaluateTrajectory(
     request.initial_state, nominal_controls_, *request.race_line,
-    request.distance_field, &result.predicted_states);
+    request.distance_field, &result.predicted_states, request.obstacles);
   result.metrics = trajectoryMetrics(
     request.initial_state, result.predicted_states, *request.race_line,
-    request.distance_field);
+    request.distance_field, request.obstacles);
   const bool finite_cost = finite(result.cost.total());
   const bool complete_trajectory_safe = result.cost.collision <= 0.0;
   result.valid = finite_cost && complete_trajectory_safe;
