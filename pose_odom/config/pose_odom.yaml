@@ -1,0 +1,70 @@
+pose_odom:
+  ros__parameters:
+
+    ############################################################
+    # Topics and frames
+    ############################################################
+
+    tracked_pose_topic: "/tracked_pose"   # geometry_msgs/PoseStamped (Cartographer)
+    vesc_topic: "/sensors/core"           # vesc_msgs/VescStateStamped
+    odom_topic: "/car/odom"               # nav_msgs/Odometry (output)
+
+    # Frame of /tracked_pose. Cartographer's map_frame is "map".
+    odom_frame: "map"
+    base_frame: "base_link"
+
+    # Output rate [Hz]. tracked_pose arrives at ~200 Hz; 50 is plenty for a
+    # controller and lighter on the bus. Set 0.0 to publish on every pose.
+    publish_rate: 50.0
+
+    ############################################################
+    # Speed from motor RPM
+    ############################################################
+
+    # v = erpm * erpm_to_speed_gain
+    #
+    # Leave erpm_to_speed_gain at 0.0 to compute it from the physical values
+    # below:
+    #   gain = 2*pi*wheel_radius / (60 * pole_pairs * gear_ratio)
+    #
+    # pole_pairs = 3 is inferred from the old distance_scale of 1/505; verify
+    # it with the calibration procedure (see log_calibration).
+    erpm_to_speed_gain: 6.145e-4
+    wheel_radius: 0.05017
+    gear_ratio: 8.55
+    pole_pairs: 1.0
+
+    ############################################################
+    # Fusion with tracked_pose derivative
+    ############################################################
+
+    # Published speed magnitude:
+    #   (1 - pose_weight)*|v_rpm| + pose_weight*|v_pose_lp|
+    # pose_weight only *softens* an RPM scale error, it cannot cancel it, and
+    # it trades in pose noise. Calibrate the gain instead of leaning on this.
+    pose_weight: 0.15
+
+    # Low-pass factors in [0,1]. Larger = more responsive but noisier.
+    pose_speed_alpha: 0.15
+    yaw_rate_alpha: 0.15
+
+    # Once the pose-derived speed clears this [m/s], its sign sets direction
+    # (the sensorless ERPM sign is unreliable near zero). Below it, the last
+    # confident direction is held.
+    direction_threshold: 0.15
+
+    # Ignore pose pairs further apart than this [s].
+    max_pose_dt: 0.5
+
+    ############################################################
+    # Calibration and covariance
+    ############################################################
+
+    # When true, logs rpm_speed, pose_speed, and their ratio. Drive a steady
+    # speed and multiply gain (or pole_pairs) by the reported ratio so RPM
+    # matches the pose-derived speed.
+    log_calibration: false
+
+    position_variance: 0.0025   # (0.05 m)^2
+    yaw_variance: 0.0025
+    speed_variance: 0.04        # (0.2 m/s)^2
