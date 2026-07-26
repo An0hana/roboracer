@@ -23,7 +23,7 @@ def generate_launch_description():
 
             arguments=[
                 "-configuration_directory", config_dir,
-                "-configuration_basename", "my_car.lua"
+                "-configuration_basename", "my_car.lua",
             ],
 
             remappings=[
