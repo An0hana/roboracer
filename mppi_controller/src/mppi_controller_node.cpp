@@ -61,39 +61,54 @@ private:
     rclcpp::Time received{0, 0, RCL_ROS_TIME};
   };
 
+  struct TimedDistanceField
+  {
+    std::shared_ptr<const DistanceField> field;
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+    rclcpp::Time received{0, 0, RCL_ROS_TIME};
+  };
+
   void declareParameters()
   {
-    declare_parameter<std::string>("odom_topic", "/state_estimation/odom");
-    declare_parameter<std::string>("map_topic", "/map");
+    declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
+    declare_parameter<std::string>("costmap_topic", "/perception/local_costmap");
     declare_parameter<std::string>("command_topic", "/control/mppi_cmd");
     declare_parameter<std::string>("path_topic", "/control/mppi_path");
     declare_parameter<std::string>("diagnostics_topic", "/diagnostics");
     declare_parameter<std::string>("map_frame", "map");
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<std::string>("race_line_file", "");
-    declare_parameter<std::string>("backend", "auto");
+    declare_parameter<std::string>("backend", "cuda");
     declare_parameter<double>("control_frequency", 20.0);
     declare_parameter<double>("state_timeout", 0.10);
+    declare_parameter<double>("costmap_timeout", 0.10);
+    declare_parameter<double>("costmap_processing_frequency", 20.0);
     declare_parameter<double>("output_timeout", 0.10);
     declare_parameter<double>("tf_timeout", 0.02);
     declare_parameter<double>("max_solve_time_ms", 40.0);
     declare_parameter<double>("localization_position_jump_threshold", 0.50);
     declare_parameter<double>("localization_yaw_jump_threshold", 0.70);
     declare_parameter<double>("localization_jump_hold_time", 0.50);
-    declare_parameter<bool>("require_map", true);
+    declare_parameter<bool>("require_costmap", true);
     declare_parameter<int>("occupied_threshold", 50);
-    declare_parameter<bool>("unknown_is_occupied", true);
+    declare_parameter<bool>("unknown_is_occupied", false);
 
     declare_parameter<int>("mppi.rollout_count", 2048);
-    declare_parameter<int>("mppi.horizon_steps", 32);
+    declare_parameter<int>("mppi.horizon_steps", 48);
     declare_parameter<double>("mppi.dt", 0.05);
     declare_parameter<double>("mppi.lambda", 1.0);
     declare_parameter<double>("mppi.steering_rate_stddev", 0.8);
     declare_parameter<double>("mppi.acceleration_stddev", 0.8);
+    declare_parameter<double>("mppi.pure_noise_fraction", 0.05);
+    declare_parameter<double>("mppi.near_obstacle_distance", 0.50);
+    declare_parameter<double>("mppi.near_obstacle_exploration_scale", 1.50);
     declare_parameter<int>("mppi.random_seed", 7);
     declare_parameter<int>("mppi.nearest_search_radius", 80);
     declare_parameter<double>("mppi.cbf_gamma", 0.35);
-    declare_parameter<double>("mppi.max_lateral_acceleration", 4.0);
+    declare_parameter<double>("mppi.max_lateral_acceleration", 6.0);
+    declare_parameter<double>("mppi.minimum_preview_distance", 4.0);
+    declare_parameter<double>("mppi.maximum_heading_error", 1.20);
+    declare_parameter<double>("mppi.reverse_progress_tolerance", 0.05);
     declare_parameter<int>("mppi.repair_steps", 4);
     declare_parameter<int>("mppi.repair_iterations", 2);
     declare_parameter<double>("mppi.repair_budget_ms", 3.0);
@@ -105,8 +120,8 @@ private:
     declare_parameter<double>("vehicle.rear_overhang", 0.124);
     declare_parameter<double>("vehicle.width", 0.320);
     declare_parameter<double>("vehicle.safety_margin", 0.05);
-    declare_parameter<double>("vehicle.min_steering", -0.20);
-    declare_parameter<double>("vehicle.max_steering", 0.20);
+    declare_parameter<double>("vehicle.min_steering", -0.32);
+    declare_parameter<double>("vehicle.max_steering", 0.32);
     declare_parameter<double>("vehicle.min_steering_rate", -1.5);
     declare_parameter<double>("vehicle.max_steering_rate", 1.5);
     declare_parameter<double>("vehicle.min_acceleration", -1.5);
@@ -115,16 +130,19 @@ private:
     declare_parameter<double>("vehicle.max_speed", 2.0);
 
     declare_parameter<double>("weights.lateral", 12.0);
-    declare_parameter<double>("weights.heading", 3.0);
+    declare_parameter<double>("weights.heading", 8.0);
     declare_parameter<double>("weights.lag", 1.0);
-    declare_parameter<double>("weights.speed", 2.0);
-    declare_parameter<double>("weights.progress", 4.0);
+    declare_parameter<double>("weights.speed", 50.0);
+    declare_parameter<double>("weights.progress", 8.0);
     declare_parameter<double>("weights.control", 0.15);
     declare_parameter<double>("weights.control_change", 0.4);
     declare_parameter<double>("weights.lateral_acceleration", 0.25);
     declare_parameter<double>("weights.boundary", 250.0);
     declare_parameter<double>("weights.cbf", 400.0);
     declare_parameter<double>("weights.collision", 1.0e6);
+    declare_parameter<double>("weights.terminal_lateral", 80.0);
+    declare_parameter<double>("weights.terminal_heading", 60.0);
+    declare_parameter<double>("weights.terminal_progress", 120.0);
   }
 
   template<typename T>
@@ -188,8 +206,15 @@ private:
       mppi_.lambda = parameter<double>("mppi.lambda");
       mppi_.steering_rate_stddev = parameter<double>("mppi.steering_rate_stddev");
       mppi_.acceleration_stddev = parameter<double>("mppi.acceleration_stddev");
+      mppi_.pure_noise_fraction = parameter<double>("mppi.pure_noise_fraction");
       mppi_.cbf_gamma = parameter<double>("mppi.cbf_gamma");
       mppi_.max_lateral_acceleration = parameter<double>("mppi.max_lateral_acceleration");
+      mppi_.minimum_preview_distance =
+        parameter<double>("mppi.minimum_preview_distance");
+      mppi_.maximum_heading_error =
+        parameter<double>("mppi.maximum_heading_error");
+      mppi_.reverse_progress_tolerance =
+        parameter<double>("mppi.reverse_progress_tolerance");
       mppi_.repair_budget_ms = parameter<double>("mppi.repair_budget_ms");
       mppi_.repair_clearance = parameter<double>("mppi.repair_clearance");
       mppi_.weights.lateral = parameter<double>("weights.lateral");
@@ -203,9 +228,30 @@ private:
       mppi_.weights.boundary = parameter<double>("weights.boundary");
       mppi_.weights.cbf = parameter<double>("weights.cbf");
       mppi_.weights.collision = parameter<double>("weights.collision");
+      mppi_.weights.terminal_lateral =
+        parameter<double>("weights.terminal_lateral");
+      mppi_.weights.terminal_heading =
+        parameter<double>("weights.terminal_heading");
+      mppi_.weights.terminal_progress =
+        parameter<double>("weights.terminal_progress");
+      if (vehicle_.min_acceleration >= 0.0) {
+        error = "vehicle.min_acceleration must provide braking";
+        return false;
+      }
+      const double horizon_distance =
+        vehicle_.max_speed * mppi_.dt * static_cast<double>(mppi_.horizon_steps);
+      const double stopping_distance =
+        vehicle_.max_speed * vehicle_.max_speed /
+        (2.0 * std::abs(vehicle_.min_acceleration));
+      if (horizon_distance <
+        stopping_distance + vehicle_.length + vehicle_.safety_margin)
+      {
+        error = "MPPI horizon is shorter than the maximum-speed stopping requirement";
+        return false;
+      }
 
       odom_topic_ = parameter<std::string>("odom_topic");
-      map_topic_ = parameter<std::string>("map_topic");
+      costmap_topic_ = parameter<std::string>("costmap_topic");
       command_topic_ = parameter<std::string>("command_topic");
       path_topic_ = parameter<std::string>("path_topic");
       diagnostics_topic_ = parameter<std::string>("diagnostics_topic");
@@ -213,6 +259,9 @@ private:
       base_frame_ = parameter<std::string>("base_frame");
       control_frequency_ = parameter<double>("control_frequency");
       state_timeout_ = parameter<double>("state_timeout");
+      costmap_timeout_ = parameter<double>("costmap_timeout");
+      costmap_processing_frequency_ =
+        parameter<double>("costmap_processing_frequency");
       output_timeout_ = parameter<double>("output_timeout");
       tf_timeout_ = parameter<double>("tf_timeout");
       max_solve_time_ms_ = parameter<double>("max_solve_time_ms");
@@ -220,13 +269,20 @@ private:
         parameter<double>("localization_position_jump_threshold");
       localization_yaw_jump_threshold_ = parameter<double>("localization_yaw_jump_threshold");
       localization_jump_hold_time_ = parameter<double>("localization_jump_hold_time");
-      require_map_ = parameter<bool>("require_map");
+      require_costmap_ = parameter<bool>("require_costmap");
       occupied_threshold_ = parameter<int>("occupied_threshold");
       unknown_is_occupied_ = parameter<bool>("unknown_is_occupied");
+      near_obstacle_distance_ = parameter<double>("mppi.near_obstacle_distance");
+      near_obstacle_exploration_scale_ =
+        parameter<double>("mppi.near_obstacle_exploration_scale");
       if (!positive(control_frequency_) || !positive(state_timeout_) ||
+        !positive(costmap_timeout_) || !positive(costmap_processing_frequency_) ||
         !positive(output_timeout_) || !positive(tf_timeout_) || !positive(max_solve_time_ms_) ||
         !positive(localization_position_jump_threshold_) ||
         !positive(localization_yaw_jump_threshold_) || !positive(localization_jump_hold_time_) ||
+        !positive(near_obstacle_distance_) ||
+        !std::isfinite(near_obstacle_exploration_scale_) ||
+        near_obstacle_exploration_scale_ < 1.0 ||
         occupied_threshold_ < 0 || occupied_threshold_ > 100)
       {
         error = "node timing or occupancy parameters are out of range";
@@ -258,9 +314,9 @@ private:
     odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, rclcpp::QoS(10),
       std::bind(&MppiControllerNode::odomCallback, this, std::placeholders::_1));
-    map_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-      map_topic_, rclcpp::QoS(1).transient_local().reliable(),
-      std::bind(&MppiControllerNode::mapCallback, this, std::placeholders::_1));
+    costmap_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+      costmap_topic_, rclcpp::QoS(1).reliable(),
+      std::bind(&MppiControllerNode::costmapCallback, this, std::placeholders::_1));
 
     if (!backend_->warmup(*race_line_, nullptr)) {
       RCLCPP_ERROR(
@@ -302,7 +358,7 @@ private:
   {
     control_timer_.reset();
     odom_subscription_.reset();
-    map_subscription_.reset();
+    costmap_subscription_.reset();
     command_publisher_.reset();
     path_publisher_.reset();
     diagnostic_publisher_.reset();
@@ -314,8 +370,12 @@ private:
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
       latest_state_.reset();
-      distance_field_.reset();
+      latest_distance_field_.reset();
       last_localization_jump_time_.reset();
+    }
+    {
+      std::lock_guard<std::mutex> lock(costmap_callback_mutex_);
+      last_costmap_processing_time_.reset();
     }
     return CallbackReturn::SUCCESS;
   }
@@ -377,14 +437,25 @@ private:
     latest_state_ = timed;
   }
 
-  void mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr message)
+  void costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr message)
   {
+    std::lock_guard<std::mutex> callback_lock(costmap_callback_mutex_);
     if (!message->header.frame_id.empty() && message->header.frame_id != map_frame_) {
       RCLCPP_ERROR(
         get_logger(), "Rejected occupancy grid in frame '%s'; expected '%s'",
         message->header.frame_id.c_str(), map_frame_.c_str());
       return;
     }
+    const rclcpp::Time received = now();
+    if (last_costmap_processing_time_.has_value()) {
+      const double elapsed = (received - *last_costmap_processing_time_).seconds();
+      if (std::isfinite(elapsed) && elapsed >= 0.0 &&
+        elapsed < 0.75 / costmap_processing_frequency_)
+      {
+        return;
+      }
+    }
+    last_costmap_processing_time_ = received;
     try {
       auto field = std::make_shared<DistanceField>(DistanceField::fromOccupancyGrid(
           message->info.width, message->info.height, message->info.resolution,
@@ -395,15 +466,20 @@ private:
         throw std::runtime_error(
                 "selected MPPI backend rejected the distance field or its dimensions");
       }
+      rclcpp::Time source_stamp(message->header.stamp, get_clock()->get_clock_type());
+      if (source_stamp.nanoseconds() == 0) {
+        source_stamp = received;
+      }
       {
         std::lock_guard<std::mutex> lock(data_mutex_);
-        distance_field_ = std::move(field);
+        latest_distance_field_ = TimedDistanceField{
+          std::move(field), source_stamp, received};
       }
-      RCLCPP_INFO(
-        get_logger(), "Distance field ready: %ux%u at %.3f m/cell",
+      RCLCPP_INFO_ONCE(
+        get_logger(), "Local distance field ready: %ux%u at %.3f m/cell",
         message->info.width, message->info.height, message->info.resolution);
     } catch (const std::exception & exception) {
-      RCLCPP_ERROR(get_logger(), "Rejected occupancy grid: %s", exception.what());
+      RCLCPP_ERROR(get_logger(), "Rejected local costmap: %s", exception.what());
     }
   }
 
@@ -418,19 +494,21 @@ private:
     }
     std::optional<TimedState> timed_state;
     std::optional<rclcpp::Time> localization_jump_time;
-    std::shared_ptr<const DistanceField> distance_field;
+    std::optional<TimedDistanceField> timed_distance_field;
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
       timed_state = latest_state_;
-      distance_field = distance_field_;
+      timed_distance_field = latest_distance_field_;
       localization_jump_time = last_localization_jump_time_;
     }
     if (!timed_state.has_value()) {
+      safeResetBackend();
       publishStop("state_unavailable", diagnostic_msgs::msg::DiagnosticStatus::ERROR);
       return;
     }
     const double state_age = (tick_time - timed_state->stamp).seconds();
     if (!std::isfinite(state_age) || state_age < -0.02 || state_age > state_timeout_) {
+      safeResetBackend();
       publishStop("state_stale", diagnostic_msgs::msg::DiagnosticStatus::ERROR, state_age);
       return;
     }
@@ -439,13 +517,32 @@ private:
       if (!std::isfinite(jump_age) || jump_age < 0.0 ||
         jump_age < localization_jump_hold_time_)
       {
+        safeResetBackend();
         publishStop("localization_jump", diagnostic_msgs::msg::DiagnosticStatus::ERROR, state_age);
         return;
       }
     }
-    if (require_map_ && distance_field == nullptr) {
-      publishStop("map_unavailable", diagnostic_msgs::msg::DiagnosticStatus::ERROR, state_age);
+    if (require_costmap_ && !timed_distance_field.has_value()) {
+      safeResetBackend();
+      publishStop("costmap_unavailable", diagnostic_msgs::msg::DiagnosticStatus::ERROR, state_age);
       return;
+    }
+    double costmap_age = std::numeric_limits<double>::quiet_NaN();
+    std::shared_ptr<const DistanceField> distance_field;
+    if (timed_distance_field.has_value()) {
+      costmap_age = (tick_time - timed_distance_field->stamp).seconds();
+      const double receive_age = (tick_time - timed_distance_field->received).seconds();
+      if (!std::isfinite(costmap_age) || costmap_age < -0.02 ||
+        costmap_age > costmap_timeout_ || !std::isfinite(receive_age) ||
+        receive_age < -0.02 || receive_age > costmap_timeout_)
+      {
+        safeResetBackend();
+        publishStop(
+          "costmap_stale", diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+          state_age, nullptr, costmap_age);
+        return;
+      }
+      distance_field = timed_distance_field->field;
     }
 
     MppiRequest request;
@@ -465,6 +562,16 @@ private:
     }
     request.race_line = &(*race_line_);
     request.distance_field = distance_field.get();
+    if (distance_field != nullptr) {
+      const double clearance = distance_field->clearance(
+        request.initial_state.x, request.initial_state.y);
+      if (std::isfinite(clearance) && clearance < near_obstacle_distance_) {
+        const double proximity = std::clamp(
+          (near_obstacle_distance_ - clearance) / near_obstacle_distance_, 0.0, 1.0);
+        request.exploration_scale = 1.0 +
+          proximity * (near_obstacle_exploration_scale_ - 1.0);
+      }
+    }
     MppiResult result;
     try {
       result = backend_->compute(request);
@@ -482,7 +589,9 @@ private:
     if (!result.valid || result.solve_time_ms > max_solve_time_ms_) {
       const std::string reason = result.valid ? "solve_timeout" : result.reason;
       safeResetBackend();
-      publishStop(reason, diagnostic_msgs::msg::DiagnosticStatus::ERROR, state_age, &result);
+      publishStop(
+        reason, diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+        state_age, &result, costmap_age);
       return;
     }
 
@@ -496,7 +605,9 @@ private:
     const State commanded_state = model_->step(request.initial_state, result.control, command_dt);
     publishCommand(commanded_state, result.control, tick_time);
     publishPath(result.predicted_states, tick_time);
-    publishDiagnostics("ok", diagnostic_msgs::msg::DiagnosticStatus::OK, state_age, &result);
+    publishDiagnostics(
+      result.reason, diagnostic_msgs::msg::DiagnosticStatus::OK,
+      state_age, &result, costmap_age, request.exploration_scale);
     last_commanded_steering_ = commanded_state.steering;
     last_applied_control_ = result.control;
     last_command_time_ = tick_time;
@@ -532,7 +643,8 @@ private:
   void publishStop(
     const std::string & reason, std::uint8_t level,
     double state_age = std::numeric_limits<double>::quiet_NaN(),
-    const MppiResult * result = nullptr)
+    const MppiResult * result = nullptr,
+    double costmap_age = std::numeric_limits<double>::quiet_NaN())
   {
     const rclcpp::Time stamp = now();
     State stopped;
@@ -540,7 +652,7 @@ private:
     publishCommand(stopped, Control{0.0, vehicle_.min_acceleration}, stamp);
     last_applied_control_ = Control{0.0, vehicle_.min_acceleration};
     last_output_time_ = stamp;
-    publishDiagnostics(reason, level, state_age, result);
+    publishDiagnostics(reason, level, state_age, result, costmap_age);
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 1000, "MPPI stop: %s", reason.c_str());
   }
@@ -577,7 +689,9 @@ private:
 
   void publishDiagnostics(
     const std::string & reason, std::uint8_t level, double state_age,
-    const MppiResult * result)
+    const MppiResult * result,
+    double costmap_age = std::numeric_limits<double>::quiet_NaN(),
+    double exploration_scale = 1.0)
   {
     if (diagnostic_publisher_ == nullptr || !diagnostic_publisher_->is_activated()) {
       return;
@@ -602,6 +716,8 @@ private:
     cuda_compiled.value = cudaBackendCompiled() ? "true" : "false";
     status.values.push_back(std::move(cuda_compiled));
     status.values.push_back(diagnosticValue("state_age_s", state_age));
+    status.values.push_back(diagnosticValue("costmap_age_s", costmap_age));
+    status.values.push_back(diagnosticValue("exploration_scale", exploration_scale));
     status.values.push_back(diagnosticValue(
       "output_age_s", (now() - last_output_time_).seconds()));
     if (result != nullptr) {
@@ -620,6 +736,48 @@ private:
       status.values.push_back(diagnosticValue("cost_boundary", result->cost.boundary));
       status.values.push_back(diagnosticValue("cost_cbf", result->cost.cbf));
       status.values.push_back(diagnosticValue("cost_collision", result->cost.collision));
+      status.values.push_back(diagnosticValue(
+        "cost_terminal_lateral", result->cost.terminal_lateral));
+      status.values.push_back(diagnosticValue(
+        "cost_terminal_heading", result->cost.terminal_heading));
+      status.values.push_back(diagnosticValue(
+        "cost_terminal_progress", result->cost.terminal_progress));
+      status.values.push_back(diagnosticValue(
+        "rollout_count", static_cast<double>(result->rollout_count)));
+      diagnostic_msgs::msg::KeyValue valid_rollouts;
+      valid_rollouts.key = "valid_rollouts";
+      valid_rollouts.value = result->valid_rollouts.has_value() ?
+        std::to_string(*result->valid_rollouts) : "not_exposed_by_cuda_backend";
+      status.values.push_back(std::move(valid_rollouts));
+      diagnostic_msgs::msg::KeyValue valid_rollout_ratio;
+      valid_rollout_ratio.key = "valid_rollout_ratio";
+      if (result->valid_rollouts.has_value() && result->rollout_count > 0U) {
+        valid_rollout_ratio.value = std::to_string(
+          static_cast<double>(*result->valid_rollouts) /
+          static_cast<double>(result->rollout_count));
+      } else {
+        valid_rollout_ratio.value = "not_exposed_by_cuda_backend";
+      }
+      status.values.push_back(std::move(valid_rollout_ratio));
+      status.values.push_back(diagnosticValue(
+        "horizon_time_s",
+        mppi_.dt * static_cast<double>(mppi_.horizon_steps)));
+      status.values.push_back(diagnosticValue(
+        "target_speed", result->metrics.target_speed));
+      status.values.push_back(diagnosticValue(
+        "preview_target_m", result->metrics.preview_target));
+      status.values.push_back(diagnosticValue(
+        "predicted_distance_m", result->metrics.predicted_distance));
+      status.values.push_back(diagnosticValue(
+        "forward_progress_m", result->metrics.forward_progress));
+      status.values.push_back(diagnosticValue(
+        "maximum_heading_error_rad", result->metrics.maximum_heading_error));
+      status.values.push_back(diagnosticValue(
+        "minimum_clearance_m", result->metrics.minimum_clearance));
+      status.values.push_back(diagnosticValue(
+        "stopping_distance_m", result->metrics.stopping_distance));
+      status.values.push_back(diagnosticValue(
+        "reverse_steps", static_cast<double>(result->metrics.reverse_steps)));
     }
     array.status.push_back(std::move(status));
     diagnostic_publisher_->publish(array);
@@ -631,9 +789,9 @@ private:
   std::unique_ptr<MppiBackend> backend_;
   std::unique_ptr<BicycleModel> model_;
   std::string race_line_file_;
-  std::string requested_backend_{"auto"};
+  std::string requested_backend_{"cuda"};
   std::string odom_topic_;
-  std::string map_topic_;
+  std::string costmap_topic_;
   std::string command_topic_;
   std::string path_topic_;
   std::string diagnostics_topic_;
@@ -641,20 +799,26 @@ private:
   std::string base_frame_;
   double control_frequency_{20.0};
   double state_timeout_{0.10};
+  double costmap_timeout_{0.10};
+  double costmap_processing_frequency_{20.0};
   double output_timeout_{0.10};
   double tf_timeout_{0.02};
   double max_solve_time_ms_{40.0};
   double localization_position_jump_threshold_{0.50};
   double localization_yaw_jump_threshold_{0.70};
   double localization_jump_hold_time_{0.50};
-  bool require_map_{true};
+  bool require_costmap_{true};
   int occupied_threshold_{50};
   bool unknown_is_occupied_{true};
+  double near_obstacle_distance_{0.50};
+  double near_obstacle_exploration_scale_{1.50};
 
   std::mutex data_mutex_;
+  std::mutex costmap_callback_mutex_;
   std::optional<TimedState> latest_state_;
-  std::shared_ptr<const DistanceField> distance_field_;
+  std::optional<TimedDistanceField> latest_distance_field_;
   std::optional<rclcpp::Time> last_localization_jump_time_;
+  std::optional<rclcpp::Time> last_costmap_processing_time_;
   double last_commanded_steering_{0.0};
   Control last_applied_control_{};
   std::optional<rclcpp::Time> last_command_time_;
@@ -663,7 +827,7 @@ private:
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
-  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_subscription_;
   rclcpp_lifecycle::LifecyclePublisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
     command_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;

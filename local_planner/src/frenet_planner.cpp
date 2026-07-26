@@ -7,6 +7,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -19,6 +20,7 @@ namespace
 
 constexpr double kEpsilon = 1.0e-9;
 constexpr double kMaximumReferenceSegment = 0.30;
+constexpr std::uint8_t kOpponentClassification = 1U;
 
 bool finite(double value)
 {
@@ -74,33 +76,69 @@ double parseNumber(
   return result;
 }
 
-double quinticSmoothStep(double ratio)
+struct QuinticPolynomial
 {
-  const double value = std::clamp(ratio, 0.0, 1.0);
-  const double squared = value * value;
-  const double cubed = squared * value;
-  return 10.0 * cubed - 15.0 * cubed * value + 6.0 * cubed * squared;
-}
+  QuinticPolynomial(
+    double start_position, double start_slope, double start_second_derivative,
+    double end_position, double end_slope, double end_second_derivative,
+    double length)
+  {
+    if (!finite(length) || length <= kEpsilon) {
+      throw std::invalid_argument("quintic polynomial length must be positive");
+    }
+    coefficients[0] = start_position;
+    coefficients[1] = start_slope;
+    coefficients[2] = 0.5 * start_second_derivative;
 
-double signedCurvature(
-  const TrajectorySample & previous, const TrajectorySample & current,
-  const TrajectorySample & next)
-{
-  const double first_x = current.x - previous.x;
-  const double first_y = current.y - previous.y;
-  const double second_x = next.x - current.x;
-  const double second_y = next.y - current.y;
-  const double chord_x = next.x - previous.x;
-  const double chord_y = next.y - previous.y;
-  const double denominator =
-    std::hypot(first_x, first_y) *
-    std::hypot(second_x, second_y) *
-    std::hypot(chord_x, chord_y);
-  if (denominator <= kEpsilon) {
-    return 0.0;
+    const double length2 = length * length;
+    const double length3 = length2 * length;
+    const double length4 = length3 * length;
+    const double length5 = length4 * length;
+    const double position_residual =
+      end_position -
+      (coefficients[0] + coefficients[1] * length +
+      coefficients[2] * length2);
+    const double slope_residual =
+      end_slope - (coefficients[1] + 2.0 * coefficients[2] * length);
+    const double second_residual =
+      end_second_derivative - 2.0 * coefficients[2];
+    coefficients[3] =
+      (10.0 * position_residual - 4.0 * slope_residual * length +
+      0.5 * second_residual * length2) / length3;
+    coefficients[4] =
+      (-15.0 * position_residual + 7.0 * slope_residual * length -
+      second_residual * length2) / length4;
+    coefficients[5] =
+      (6.0 * position_residual - 3.0 * slope_residual * length +
+      0.5 * second_residual * length2) / length5;
   }
-  return 2.0 * (first_x * second_y - first_y * second_x) / denominator;
-}
+
+  [[nodiscard]] double position(double progress) const
+  {
+    return coefficients[0] + progress * (
+      coefficients[1] + progress * (
+        coefficients[2] + progress * (
+          coefficients[3] + progress * (
+            coefficients[4] + progress * coefficients[5]))));
+  }
+
+  [[nodiscard]] double slope(double progress) const
+  {
+    return coefficients[1] + progress * (
+      2.0 * coefficients[2] + progress * (
+        3.0 * coefficients[3] + progress * (
+          4.0 * coefficients[4] + progress * 5.0 * coefficients[5])));
+  }
+
+  [[nodiscard]] double secondDerivative(double progress) const
+  {
+    return 2.0 * coefficients[2] + progress * (
+      6.0 * coefficients[3] + progress * (
+        12.0 * coefficients[4] + progress * 20.0 * coefficients[5]));
+  }
+
+  std::array<double, 6> coefficients{};
+};
 
 struct Rectangle
 {
@@ -168,7 +206,6 @@ void validateConfig(const FrenetPlannerConfig & config)
     config.lateral_samples_per_side == 0U ||
     config.lateral_samples_per_side > 10U ||
     candidate_limit > 1000U ||
-    !finite(config.transition_length) || config.transition_length <= 0.0 ||
     !finite(config.overtake_offset) || config.overtake_offset <= 0.0 ||
     !finite(config.minimum_lateral_offset) ||
     config.minimum_lateral_offset <= 0.0 ||
@@ -177,10 +214,15 @@ void validateConfig(const FrenetPlannerConfig & config)
     config.boundary_sampling_buffer < 0.0 ||
     config.projection_search_radius == 0U ||
     !finite(config.max_projection_distance) || config.max_projection_distance <= 0.0 ||
+    !finite(config.max_projection_heading_error) ||
+    config.max_projection_heading_error <= 0.0 ||
+    config.max_projection_heading_error > 0.5 * 3.14159265358979323846 ||
     !finite(config.minimum_frenet_jacobian) ||
     config.minimum_frenet_jacobian <= 0.0 ||
     !finite(config.vehicle_length) || config.vehicle_length <= 0.0 ||
     !finite(config.vehicle_width) || config.vehicle_width <= 0.0 ||
+    !finite(config.rear_overhang) || config.rear_overhang < 0.0 ||
+    config.rear_overhang >= config.vehicle_length ||
     !finite(config.safety_margin) || config.safety_margin < 0.0 ||
     !finite(config.collision_margin) || config.collision_margin < 0.0 ||
     !finite(config.default_opponent_length) || config.default_opponent_length <= 0.0 ||
@@ -191,14 +233,19 @@ void validateConfig(const FrenetPlannerConfig & config)
     !finite(config.max_lateral_acceleration) ||
     config.max_lateral_acceleration <= 0.0 ||
     !finite(config.min_acceleration) || !finite(config.max_acceleration) ||
+    config.min_acceleration >= 0.0 ||
+    config.max_acceleration < 0.0 ||
     config.min_acceleration > config.max_acceleration ||
     !finite(config.max_curvature) || config.max_curvature <= 0.0 ||
+    !finite(config.trailing_stop_margin) ||
+    config.trailing_stop_margin < 0.0 ||
     !finite(config.weight_lateral_offset) || config.weight_lateral_offset < 0.0 ||
     !finite(config.weight_curvature) || config.weight_curvature < 0.0 ||
     !finite(config.weight_clearance) || config.weight_clearance < 0.0 ||
     !finite(config.weight_switch) || config.weight_switch < 0.0 ||
     !finite(config.weight_speed) || config.weight_speed < 0.0 ||
-    !finite(config.weight_horizon) || config.weight_horizon < 0.0)
+    !finite(config.weight_horizon) || config.weight_horizon < 0.0 ||
+    !finite(config.weight_stop) || config.weight_stop < 0.0)
   {
     throw std::invalid_argument("invalid Frenet planner configuration");
   }
@@ -385,9 +432,15 @@ ReferencePoint ReferenceLine::sample(double s) const
 
 FrenetProjection ReferenceLine::project(
   double x, double y, std::optional<std::size_t> hint,
-  std::size_t search_radius) const
+  std::size_t search_radius, std::optional<double> yaw,
+  double maximum_heading_error) const
 {
-  if (!finite(x) || !finite(y) || !valid() || search_radius == 0U) {
+  if (!finite(x) || !finite(y) || !valid() || search_radius == 0U ||
+    (yaw.has_value() && !finite(*yaw)) ||
+    !finite(maximum_heading_error) ||
+    maximum_heading_error <= 0.0 ||
+    maximum_heading_error > 3.14159265358979323846)
+  {
     throw std::invalid_argument("invalid reference-line projection request");
   }
 
@@ -405,6 +458,14 @@ FrenetProjection ReferenceLine::project(
       }
       const double tangent_x = segment_x / segment_length;
       const double tangent_y = segment_y / segment_length;
+      const double reference_yaw = std::atan2(tangent_y, tangent_x);
+      const double heading_error = yaw.has_value() ?
+        normalizeAngle(*yaw - reference_yaw) : 0.0;
+      if (yaw.has_value() &&
+        std::abs(heading_error) > maximum_heading_error)
+      {
+        return;
+      }
       const double ratio = std::clamp(
         ((x - first.x) * segment_x + (y - first.y) * segment_y) /
         (segment_length * segment_length), 0.0, 1.0);
@@ -420,6 +481,8 @@ FrenetProjection ReferenceLine::project(
       output.s = wrapS(first.s + ratio * segment_length);
       output.d = -tangent_y * offset_x + tangent_x * offset_y;
       output.distance = distance;
+      output.reference_yaw = reference_yaw;
+      output.heading_error = heading_error;
     };
 
   if (!hint.has_value() ||
@@ -456,32 +519,49 @@ FrenetPlanner::FrenetPlanner(
 PlanResult FrenetPlanner::plan(
   const EgoState & ego, const std::vector<Obstacle> & obstacles,
   std::optional<std::size_t> projection_hint,
-  std::optional<double> previous_target_d) const
+  std::optional<double> previous_target_d,
+  std::optional<int> preferred_side,
+  bool return_to_raceline,
+  double behavior_speed_scale) const
 {
   if (!finite(ego.x) || !finite(ego.y) || !finite(ego.yaw) ||
-    !finite(ego.speed))
+    !finite(ego.speed) ||
+    (ego.curvature.has_value() && !finite(*ego.curvature)) ||
+    (preferred_side.has_value() &&
+    *preferred_side != -1 && *preferred_side != 0 && *preferred_side != 1) ||
+    !finite(behavior_speed_scale) ||
+    behavior_speed_scale <= 0.0 || behavior_speed_scale > 1.0)
   {
     throw std::invalid_argument("ego state must be finite");
   }
 
   FrenetProjection projection = reference_line_.project(
-    ego.x, ego.y, projection_hint, config_.projection_search_radius);
-  if (projection.distance > config_.max_projection_distance &&
+    ego.x, ego.y, projection_hint, config_.projection_search_radius,
+    ego.yaw, config_.max_projection_heading_error);
+  if ((!finite(projection.distance) ||
+    projection.distance > config_.max_projection_distance) &&
     projection_hint.has_value())
   {
     projection = reference_line_.project(
-      ego.x, ego.y, std::nullopt, config_.projection_search_radius);
+      ego.x, ego.y, std::nullopt, config_.projection_search_radius,
+      ego.yaw, config_.max_projection_heading_error);
   }
 
   PlanResult result;
+  if (!finite(projection.distance)) {
+    result.reason = "projection_heading_mismatch";
+    return result;
+  }
   result.projection_index = projection.index;
   result.ego_s = projection.s;
   result.ego_d = projection.d;
   if (projection.distance > config_.max_projection_distance) {
+    result.reason = "projection_too_far";
     return result;
   }
 
-  const auto lateral_offsets = lateralOffsets(projection);
+  const auto lateral_offsets = lateralOffsets(
+    projection, preferred_side, return_to_raceline);
   result.candidates.reserve(
     lateral_offsets.size() * config_.planning_horizons.size() *
     config_.speed_scales.size());
@@ -491,14 +571,26 @@ PlanResult FrenetPlanner::plan(
       (target_d > 0.0 ? "left" : "right");
     for (const double horizon : config_.planning_horizons) {
       for (const double speed_scale : config_.speed_scales) {
+        const double combined_speed_scale =
+          speed_scale * behavior_speed_scale;
         std::ostringstream name;
         name << side << "_d" << std::fixed << std::setprecision(2) << target_d
              << "_h" << std::setprecision(1) << horizon
-             << "_v" << std::setprecision(0) << speed_scale * 100.0;
-        result.candidates.push_back(
-          generateCandidate(
-            projection, target_d, horizon, speed_scale, name.str(),
-            obstacles, previous_target_d));
+             << "_v" << std::setprecision(0) <<
+          combined_speed_scale * 100.0;
+        auto candidate = generateCandidate(
+          ego, projection, target_d, horizon,
+          combined_speed_scale, name.str(),
+          obstacles, previous_target_d);
+        if (candidate.valid &&
+          std::abs(target_d) >= config_.minimum_lateral_offset &&
+          !hasRequiredPassingClearance(
+            projection, candidate, obstacles))
+        {
+          candidate.valid = false;
+          candidate.reason = "pass_clearance";
+        }
+        result.candidates.push_back(std::move(candidate));
       }
     }
   }
@@ -510,14 +602,20 @@ PlanResult FrenetPlanner::plan(
       minimum_cost = candidate.cost;
       result.selected_index = index;
       result.valid = true;
+      result.reason = "ok";
     }
   }
   return result;
 }
 
 std::vector<double> FrenetPlanner::lateralOffsets(
-  const FrenetProjection & projection) const
+  const FrenetProjection & projection,
+  std::optional<int> preferred_side,
+  bool return_to_raceline) const
 {
+  if (return_to_raceline) {
+    return {0.0};
+  }
   const double required_half_width =
     0.5 * config_.vehicle_width + config_.safety_margin;
   const double maximum_horizon = *std::max_element(
@@ -562,11 +660,99 @@ std::vector<double> FrenetPlanner::lateralOffsets(
     };
   append_side(std::max(0.0, available_left), 1.0);
   append_side(std::max(0.0, available_right), -1.0);
+  if (preferred_side.has_value() && *preferred_side != 0) {
+    const bool current_offset_can_be_held =
+      (*preferred_side > 0 &&
+      projection.d >= config_.minimum_lateral_offset &&
+      projection.d <= available_left + kEpsilon) ||
+      (*preferred_side < 0 &&
+      projection.d <= -config_.minimum_lateral_offset &&
+      -projection.d <= available_right + kEpsilon);
+    if (current_offset_can_be_held) {
+      offsets.push_back(projection.d);
+    }
+    offsets.erase(
+      std::remove_if(
+        offsets.begin(), offsets.end(),
+        [&projection, &preferred_side](double offset) {
+          return *preferred_side > 0 ?
+                 offset <= kEpsilon ||
+                 offset + kEpsilon < projection.d :
+                 offset >= -kEpsilon ||
+                 offset - kEpsilon > projection.d;
+        }),
+      offsets.end());
+    std::sort(offsets.begin(), offsets.end());
+    offsets.erase(
+      std::unique(
+        offsets.begin(), offsets.end(),
+        [](double first, double second) {
+          return std::abs(first - second) < kEpsilon;
+        }),
+      offsets.end());
+  }
   return offsets;
 }
 
+bool FrenetPlanner::hasRequiredPassingClearance(
+  const FrenetProjection & projection,
+  const CandidateTrajectory & candidate,
+  const std::vector<Obstacle> & obstacles) const
+{
+  const double trajectory_length = *std::max_element(
+    config_.planning_horizons.begin(), config_.planning_horizons.end());
+  for (const auto & obstacle : obstacles) {
+    if (obstacle.classification != kOpponentClassification ||
+      !finite(obstacle.x) || !finite(obstacle.y) ||
+      !finite(obstacle.confidence) ||
+      obstacle.confidence < config_.minimum_obstacle_confidence)
+    {
+      continue;
+    }
+    const auto obstacle_projection = reference_line_.project(
+      obstacle.x, obstacle.y, projection.index,
+      config_.projection_search_radius);
+    if (!finite(obstacle_projection.distance)) {
+      continue;
+    }
+    double forward_distance = obstacle_projection.s - projection.s;
+    if (forward_distance < 0.0) {
+      forward_distance += reference_line_.length();
+    }
+    const double obstacle_length =
+      finite(obstacle.length) && obstacle.length > 0.0 ?
+      obstacle.length : config_.default_opponent_length;
+    if (forward_distance <= 0.0 ||
+      forward_distance >
+      trajectory_length + 0.5 * obstacle_length)
+    {
+      continue;
+    }
+    const double obstacle_width =
+      finite(obstacle.width) && obstacle.width > 0.0 ?
+      obstacle.width : config_.default_opponent_width;
+    const double required_center_separation =
+      0.5 * config_.vehicle_width + 0.5 * obstacle_width +
+      config_.collision_margin;
+    if (candidate.target_d > 0.0 &&
+      candidate.target_d <
+      obstacle_projection.d + required_center_separation)
+    {
+      return false;
+    }
+    if (candidate.target_d < 0.0 &&
+      candidate.target_d >
+      obstacle_projection.d - required_center_separation)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
 CandidateTrajectory FrenetPlanner::generateCandidate(
-  const FrenetProjection & projection, double target_d, double horizon,
+  const EgoState & ego, const FrenetProjection & projection,
+  double target_d, double horizon,
   double speed_scale, const std::string & name,
   const std::vector<Obstacle> & obstacles,
   std::optional<double> previous_target_d) const
@@ -579,28 +765,56 @@ CandidateTrajectory FrenetPlanner::generateCandidate(
   candidate.valid = true;
   candidate.reason = "ok";
 
+  const double trajectory_length = *std::max_element(
+    config_.planning_horizons.begin(), config_.planning_horizons.end());
   const std::size_t sample_count = static_cast<std::size_t>(
-    std::ceil(horizon / config_.sample_spacing)) + 1U;
+    std::ceil(trajectory_length / config_.sample_spacing)) + 1U;
   candidate.points.reserve(sample_count);
-  const double transition =
-    std::min(config_.transition_length, 0.5 * horizon);
   const double required_half_width =
     0.5 * config_.vehicle_width + config_.safety_margin;
+  const auto start_reference = reference_line_.sample(projection.s);
+  const double initial_jacobian =
+    1.0 - start_reference.curvature * projection.d;
+  const double heading_error =
+    normalizeAngle(ego.yaw - start_reference.yaw);
+  const double initial_slope =
+    initial_jacobian * std::tan(heading_error);
+  const double derivative_step = std::max(
+    config_.sample_spacing, 0.05);
+  const double start_curvature_derivative =
+    reference_line_.sample(projection.s + derivative_step).curvature -
+    reference_line_.sample(projection.s - derivative_step).curvature;
+  const double normalized_start_curvature_derivative =
+    start_curvature_derivative /
+    (2.0 * derivative_step);
+  const double desired_initial_curvature =
+    ego.curvature.value_or(start_reference.curvature);
+  const double initial_norm_squared =
+    initial_jacobian * initial_jacobian +
+    initial_slope * initial_slope;
+  const double initial_second_derivative =
+    (
+    desired_initial_curvature *
+    std::pow(initial_norm_squared, 1.5) -
+    initial_jacobian * initial_jacobian * start_reference.curvature -
+    normalized_start_curvature_derivative * projection.d * initial_slope -
+    2.0 * start_reference.curvature * initial_slope * initial_slope) /
+    std::max(initial_jacobian, config_.minimum_frenet_jacobian);
+  const QuinticPolynomial lateral_polynomial(
+    projection.d, initial_slope, initial_second_derivative,
+    target_d, 0.0, 0.0, horizon);
 
   for (std::size_t index = 0U; index < sample_count; ++index) {
     const double progress = std::min(
-      horizon,
+      trajectory_length,
       static_cast<double>(index) * config_.sample_spacing);
+    const double polynomial_progress = std::min(progress, horizon);
     const auto reference = reference_line_.sample(projection.s + progress);
-    double lateral = target_d;
-    if (progress < transition) {
-      const double blend = quinticSmoothStep(progress / transition);
-      lateral = projection.d + blend * (target_d - projection.d);
-    } else if (progress > horizon - transition) {
-      const double blend = quinticSmoothStep(
-        (progress - (horizon - transition)) / transition);
-      lateral = target_d * (1.0 - blend);
-    }
+    const double lateral = lateral_polynomial.position(polynomial_progress);
+    const double lateral_slope =
+      lateral_polynomial.slope(polynomial_progress);
+    const double lateral_second =
+      lateral_polynomial.secondDerivative(polynomial_progress);
     const double jacobian = 1.0 - reference.curvature * lateral;
     if (jacobian <= config_.minimum_frenet_jacobian &&
       candidate.valid)
@@ -622,7 +836,22 @@ CandidateTrajectory FrenetPlanner::generateCandidate(
     point.d = lateral;
     point.x = reference.x - std::sin(reference.yaw) * lateral;
     point.y = reference.y + std::cos(reference.yaw) * lateral;
-    point.yaw = reference.yaw;
+    point.yaw = normalizeAngle(
+      reference.yaw + std::atan2(lateral_slope, jacobian));
+    const double curvature_derivative =
+      (
+      reference_line_.sample(reference.s + derivative_step).curvature -
+      reference_line_.sample(reference.s - derivative_step).curvature) /
+      (2.0 * derivative_step);
+    const double norm_squared =
+      jacobian * jacobian + lateral_slope * lateral_slope;
+    point.curvature =
+      (
+      jacobian * jacobian * reference.curvature +
+      jacobian * lateral_second +
+      curvature_derivative * lateral * lateral_slope +
+      2.0 * reference.curvature * lateral_slope * lateral_slope) /
+      std::pow(std::max(norm_squared, kEpsilon), 1.5);
     point.speed =
       std::min(reference.speed, config_.max_speed) * speed_scale;
     point.left_width = left_width;
@@ -630,63 +859,85 @@ CandidateTrajectory FrenetPlanner::generateCandidate(
     candidate.points.push_back(point);
   }
 
-  if (candidate.points.size() >= 2U) {
-    for (std::size_t index = 0U; index < candidate.points.size(); ++index) {
-      const std::size_t previous = index == 0U ? 0U : index - 1U;
-      const std::size_t next = std::min(
-        index + 1U, candidate.points.size() - 1U);
-      const double dx =
-        candidate.points[next].x - candidate.points[previous].x;
-      const double dy =
-        candidate.points[next].y - candidate.points[previous].y;
-      if (std::hypot(dx, dy) > kEpsilon) {
-        candidate.points[index].yaw = std::atan2(dy, dx);
-      }
-    }
-  }
-  if (candidate.points.size() >= 3U) {
-    for (std::size_t index = 1U; index + 1U < candidate.points.size(); ++index) {
-      candidate.points[index].curvature = signedCurvature(
-        candidate.points[index - 1U], candidate.points[index],
-        candidate.points[index + 1U]);
-    }
-    candidate.points.front().curvature = candidate.points[1U].curvature;
-    candidate.points.back().curvature =
-      candidate.points[candidate.points.size() - 2U].curvature;
+  if (!candidate.points.empty()) {
+    candidate.points.front().x = ego.x;
+    candidate.points.front().y = ego.y;
+    candidate.points.front().yaw = ego.yaw;
+    candidate.points.front().curvature = desired_initial_curvature;
   }
 
-  double elapsed = 0.0;
-  double clearance_cost = 0.0;
-  for (std::size_t index = 0U; index < candidate.points.size(); ++index) {
-    auto & point = candidate.points[index];
+  std::vector<double> hard_speed_limits;
+  hard_speed_limits.reserve(candidate.points.size());
+  for (auto & point : candidate.points) {
     const double absolute_curvature = std::abs(point.curvature);
     if (absolute_curvature > config_.max_curvature && candidate.valid) {
       candidate.valid = false;
       candidate.reason = "curvature_limit";
     }
+    double hard_speed_limit = config_.max_speed;
     if (absolute_curvature > kEpsilon) {
-      point.speed = std::min(
-        point.speed,
+      hard_speed_limit = std::min(
+        hard_speed_limit,
         std::sqrt(config_.max_lateral_acceleration / absolute_curvature));
     }
-    point.speed = std::clamp(point.speed, 0.0, config_.max_speed);
+    hard_speed_limits.push_back(hard_speed_limit);
+    point.speed = std::clamp(point.speed, 0.0, hard_speed_limit);
+  }
 
+  const double current_speed = std::max(0.0, ego.speed);
+  if (!candidate.points.empty()) {
+    candidate.points.front().speed = current_speed;
+  }
+  for (std::size_t index = 1U; index < candidate.points.size(); ++index) {
+    const auto & previous = candidate.points[index - 1U];
+    auto & point = candidate.points[index];
+    const double segment =
+      std::hypot(point.x - previous.x, point.y - previous.y);
+    const double acceleration_limited_speed = std::sqrt(
+      std::max(
+        0.0,
+        previous.speed * previous.speed +
+        2.0 * config_.max_acceleration * segment));
+    const double deceleration_limited_speed = std::sqrt(
+      std::max(
+        0.0,
+        previous.speed * previous.speed +
+        2.0 * config_.min_acceleration * segment));
+    point.speed = std::clamp(
+      point.speed, deceleration_limited_speed,
+      acceleration_limited_speed);
+    if (point.speed > hard_speed_limits[index] + 1.0e-6 &&
+      candidate.valid)
+    {
+      candidate.valid = false;
+      candidate.reason = "braking_limit";
+    }
+    point.speed = std::min(point.speed, hard_speed_limits[index]);
+  }
+
+  double elapsed = 0.0;
+  double clearance_cost = 0.0;
+  double path_distance = 0.0;
+  std::optional<double> first_collision_distance;
+  std::vector<double> path_distances(candidate.points.size(), 0.0);
+  for (std::size_t index = 0U; index < candidate.points.size(); ++index) {
+    auto & point = candidate.points[index];
     if (index > 0U) {
       const auto & previous = candidate.points[index - 1U];
       const double segment =
         std::hypot(point.x - previous.x, point.y - previous.y);
+      path_distance += segment;
+      path_distances[index] = path_distance;
       const double average_speed =
         std::max(0.1, 0.5 * (point.speed + previous.speed));
       elapsed += segment / average_speed;
-      const double acceleration =
-        (point.speed * point.speed - previous.speed * previous.speed) /
-        std::max(2.0 * segment, kEpsilon);
-      point.acceleration = std::clamp(
-        acceleration, config_.min_acceleration, config_.max_acceleration);
     }
 
+    const double rear_axle_to_center =
+      0.5 * config_.vehicle_length - config_.rear_overhang;
     const Rectangle ego_rectangle{
-      point.x, point.y, point.yaw,
+      point.x + rear_axle_to_center * std::cos(point.yaw),
+      point.y + rear_axle_to_center * std::sin(point.yaw), point.yaw,
       0.5 * config_.vehicle_length + 0.5 * config_.collision_margin,
       0.5 * config_.vehicle_width + 0.5 * config_.collision_margin};
     for (const auto & obstacle : obstacles) {
@@ -710,10 +961,9 @@ CandidateTrajectory FrenetPlanner::generateCandidate(
         0.5 * obstacle_length + 0.5 * config_.collision_margin,
         0.5 * obstacle_width + 0.5 * config_.collision_margin};
       if (rectanglesOverlap(ego_rectangle, obstacle_rectangle) &&
-        candidate.valid)
+        !first_collision_distance.has_value())
       {
-        candidate.valid = false;
-        candidate.reason = "collision";
+        first_collision_distance = path_distance;
       }
       const double center_distance =
         std::hypot(point.x - predicted_x, point.y - predicted_y);
@@ -721,8 +971,58 @@ CandidateTrajectory FrenetPlanner::generateCandidate(
     }
   }
 
-  const double maximum_horizon = *std::max_element(
-    config_.planning_horizons.begin(), config_.planning_horizons.end());
+  if (first_collision_distance.has_value()) {
+    const double available_stop_distance =
+      *first_collision_distance - config_.trailing_stop_margin;
+    const double required_stop_distance =
+      ego.speed * ego.speed / (-2.0 * config_.min_acceleration);
+    const bool nominal_candidate = std::abs(target_d) < kEpsilon;
+    const bool can_stop =
+      candidate.valid && nominal_candidate &&
+      available_stop_distance > kEpsilon &&
+      available_stop_distance + kEpsilon >= required_stop_distance;
+    if (can_stop) {
+      candidate.stopping = true;
+      candidate.stop_distance = available_stop_distance;
+      candidate.reason = "trailing_stop";
+      candidate.name += "_stop";
+      const double braking_deceleration = -config_.min_acceleration;
+      for (std::size_t index = 0U; index < candidate.points.size(); ++index) {
+        const double remaining =
+          std::max(0.0, available_stop_distance - path_distances[index]);
+        const double braking_speed =
+          std::sqrt(2.0 * braking_deceleration * remaining);
+        candidate.points[index].speed = std::min(
+          {candidate.points[index].speed, braking_speed,
+            std::max(0.0, ego.speed)});
+      }
+      const auto stop_point = std::lower_bound(
+        path_distances.begin(), path_distances.end(),
+        available_stop_distance);
+      const std::size_t stop_index = stop_point == path_distances.end() ?
+        candidate.points.size() - 1U :
+        static_cast<std::size_t>(
+        std::distance(path_distances.begin(), stop_point));
+      candidate.points.resize(stop_index + 1U);
+      candidate.points.back().speed = 0.0;
+    } else if (candidate.valid) {
+      candidate.valid = false;
+      candidate.reason = "collision";
+    }
+  }
+
+  for (std::size_t index = 1U; index < candidate.points.size(); ++index) {
+    auto & point = candidate.points[index];
+    const auto & previous = candidate.points[index - 1U];
+    const double segment =
+      std::hypot(point.x - previous.x, point.y - previous.y);
+    const double acceleration =
+      (point.speed * point.speed - previous.speed * previous.speed) /
+      std::max(2.0 * segment, kEpsilon);
+    point.acceleration = std::clamp(
+      acceleration, config_.min_acceleration, config_.max_acceleration);
+  }
+
   const double normalized_clearance =
     clearance_cost / std::max<std::size_t>(candidate.points.size(), 1U);
   candidate.cost =
@@ -730,14 +1030,18 @@ CandidateTrajectory FrenetPlanner::generateCandidate(
     config_.weight_clearance * normalized_clearance +
     config_.weight_speed * (1.0 - speed_scale) * (1.0 - speed_scale) +
     config_.weight_horizon *
-    (maximum_horizon - horizon) / maximum_horizon;
+    (trajectory_length - horizon) / trajectory_length;
+  if (candidate.stopping) {
+    candidate.cost += config_.weight_stop;
+  }
   double curvature_cost = 0.0;
   for (const auto & point : candidate.points) {
     curvature_cost +=
       point.curvature * point.curvature * config_.sample_spacing;
   }
   candidate.cost +=
-    config_.weight_curvature * curvature_cost / std::max(horizon, kEpsilon);
+    config_.weight_curvature * curvature_cost /
+    std::max(trajectory_length, kEpsilon);
   if (previous_target_d.has_value()) {
     const double change = target_d - *previous_target_d;
     candidate.cost += config_.weight_switch * change * change;

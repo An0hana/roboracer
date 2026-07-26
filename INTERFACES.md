@@ -6,11 +6,11 @@
 
 | 话题 | 消息类型 | 提供者 | 使用者 | 默认频率 / QoS |
 |---|---|---|---|---|
-| `/scan` | `sensor_msgs/msg/LaserScan` | LiDAR / 模拟器 | 感知、Safety | 传感器频率，SensorDataQoS |
+| `/scan` | `sensor_msgs/msg/LaserScan` | LiDAR / 模拟器 | Costmap、感知、Safety | 传感器频率，SensorDataQoS |
 | `/state_estimation/odom` | `nav_msgs/msg/Odometry` | 定位模块 | 感知、规划、MPPI、Safety | 50 Hz，Reliable KeepLast(5) |
-| `/map` | `nav_msgs/msg/OccupancyGrid` | 建图模块 | 定位、MPPI | Reliable + TransientLocal |
+| `/map` | `nav_msgs/msg/OccupancyGrid` | 建图模块 | 定位、全局赛线与可视化 | Reliable + TransientLocal |
+| `/perception/local_costmap` | `nav_msgs/msg/OccupancyGrid` | `local_costmap` | MPPI | 约40 Hz，Reliable KeepLast(1) |
 | `/perception/obstacles` | `roboracer_msgs/msg/TrackedObstacleArray` | 本地感知 | 规划、MPPI | 40–50 Hz，Reliable KeepLast(1) |
-| `/planner/local_trajectory` | `roboracer_msgs/msg/Trajectory` | 局部规划 | MPPI | 20–50 Hz，Reliable KeepLast(1) |
 | `/race_manager/state` | `roboracer_msgs/msg/RaceState` | 比赛状态机 | 规划、MPPI、Safety | 10–50 Hz，Reliable KeepLast(1) |
 | `/control/mppi_cmd` | `ackermann_msgs/msg/AckermannDriveStamped` | MPPI | Safety | 20 Hz，Reliable KeepLast(1) |
 | `/ackermann_cmd` | `ackermann_msgs/msg/AckermannDriveStamped` | Safety | 实车VESC接口 | 50 Hz，Reliable KeepLast(1) |
@@ -53,6 +53,11 @@ s,x,y,yaw,curvature,v_ref,width_left,width_right
 
 ## 职责
 
+`RaceState`除状态编号外，还提供`preferred_side`、`speed_scale`、
+`use_local_trajectory`和`fallback_ftg`，下游不得通过解析`reason`
+字符串作控制决策。`use_local_trajectory`仅为迁移期兼容字段，新MPPI链路必须保持为
+`false`。
+
 建图。负责：
 
 - `/map`
@@ -62,8 +67,8 @@ s,x,y,yaw,curvature,v_ref,width_left,width_right
 
 算法开发负责：
 
+- `/perception/local_costmap`
 - `/perception/obstacles`
-- `/planner/local_trajectory`
 - `/race_manager/state`
 - `/control/mppi_cmd`
 - MPPI与Safety接口
