@@ -4,12 +4,32 @@ ROS 2 Humble lifecycle controller with two implementations of the same `MppiBack
 interface:
 
 - `cpu_reference`: deterministic ROS-independent correctness and safety reference.
-- `cuda_mppi_generic_v0.9.0`: optional, fixed-shape 2048-rollout/32-step C++/CUDA backend
+- `cuda_mppi_generic_v0.9.0`: required runtime, fixed-shape 2048-rollout/48-step C++/CUDA backend
   built against the pinned `mppi_generic_vendor` package.
 
-`backend=auto` selects CUDA only when the CUDA translation unit was actually compiled and
-otherwise reports and uses `cpu_reference`. `backend=cuda` fails configuration on CPU-only
-builds; it never silently falls back.
+Simulation and vehicle launches default to `backend=cuda` and fail configuration when CUDA is
+unavailable; they never silently fall back. `cpu_reference` remains compiled only for unit
+tests, CI and numerical comparison.
+
+## Dynamic obstacles
+
+The controller subscribes to `/perception/obstacles` (`roboracer_msgs/TrackedObstacleArray`,
+map frame). Every tracked obstacle except `TRACK_BOUNDARY` enters both backends as a
+constant-velocity extrapolation: rollout step `k` evaluates the opponent at
+`t = k * dt + measurement_age`, so stale detections are pushed forward before the horizon
+even begins. Obstacle clearance shares the map's collision/CBF pipeline through a combined
+margin (the vehicle disk chain against a per-obstacle disk chain), which means the repair
+stage, the braking fallback and the final CPU safety validation all reject
+opponent-intersecting trajectories with exactly the same semantics as wall collisions.
+`obstacles_timeout` (default 0.20 s) degrades stale opponent data to costmap-only avoidance
+with a WARN diagnostic — never a stop, because an empty track legitimately publishes nothing.
+Diagnostics report `obstacle_count`, `obstacle_age_s`, `obstacles_stale` and
+`minimum_obstacle_clearance_m`. Up to `max_obstacle_count` (default 8, the compiled CUDA
+capacity) nearest obstacles are used per cycle.
+
+Local development note: the CUDA backend compiles for `sm_87` (Jetson Orin) by default.
+To run the hardware-gated CUDA tests on an Ada development GPU, rebuild with
+`--cmake-args -DMPPI_CONTROLLER_CUDA_ARCHITECTURE=89` and restore `87` before deploying.
 
 ## Race line
 
@@ -53,9 +73,24 @@ colcon build --packages-select mppi_controller --cmake-args -DCMAKE_BUILD_TYPE=R
 source install/setup.bash
 ros2 launch mppi_controller mppi_controller.launch.py \
   race_line_file:=/absolute/path/raceline.csv \
-  odom_topic:=/state_estimation/odom map_topic:=/map \
+  odom_topic:=/state_estimation/odom \
+  costmap_topic:=/perception/local_costmap \
   command_topic:=/control/mppi_cmd
 ```
+
+For the current single-car Gym integration, launch the scan-derived rolling costmap and
+controller together:
+
+```bash
+ros2 launch f1tenth_gym_ros gym_bridge_launch.py \
+  params_file:=/workspace/src/f1tenth_gym_ros/config/sim_racetrack_1_5x_single.yaml
+
+# In a second terminal:
+ros2 launch mppi_controller scan_mppi_sim.launch.py
+```
+
+This launch uses `/scan`, `/ego_racecar/odom`, the `racetrack_1_5x` race line and publishes
+directly to `/drive`. The Gym simulator must use the matching `racetrack_1_5x` geometry.
 
 On Jetson Orin, build the pinned vendor first and then this package:
 
@@ -72,24 +107,31 @@ colcon build --packages-select mppi_controller \
 ```
 
 The CUDA backend allocates `cuda.max_map_cells` float cells once during lifecycle warmup
-(the default 4,194,304 cells use 16 MiB). A static distance field is converted and uploaded
-only in the map callback. Every GPU rollout evaluates the rear-axle-referenced rectangular
+(the default 4,194,304 cells use 16 MiB). The latest rolling local costmap is converted to a
+distance field and uploaded from its callback. Every GPU rollout evaluates the
+rear-axle-referenced rectangular
 body through a conservative disk chain against this field, in addition to race-line,
 boundary, speed, control, control-change, lateral-acceleration and smooth barrier costs.
 The selected nominal trajectory then passes the CPU bounded first-four-step repair and a
-full-horizon CPU cost and collision diagnostic pass before publication. The repair rejects
-an unsafe or over-budget first control command; it is a bounded projected repair, not a
-general-purpose external QP/SQP solver.
+full-horizon CPU cost and collision diagnostic pass before publication. If that trajectory
+is unsafe, two deterministic maximum-braking candidates (MPPI steering and steering-neutral)
+are checked independently before the controller requests a stop. The repair rejects an unsafe
+or over-budget first control command; it is a bounded projected repair, not a general-purpose
+external QP/SQP solver.
 
-For simulation, pass `command_topic:=/drive use_sim_time:=true` only when no separate command
-arbiter owns `/drive`. On hardware, keep `/control/mppi_cmd` and let the safety arbiter own
-`/ackermann_cmd`.
+For online Gym simulation, pass `command_topic:=/drive use_sim_time:=false` because the current
+bridge does not publish `/clock`. Use simulated time only for clocked simulation or rosbag
+playback. On hardware, keep `/control/mppi_cmd` and let the safety arbiter own `/ackermann_cmd`.
 
-The default is 2048 rollouts, 32 steps, 0.05 s model time, and 20 Hz. Those rollout and horizon
-sizes are compile-time constants for CUDA; requesting different values with `backend=cuda`
-is rejected. The CPU backend uses OpenMP when available, but is a correctness reference
-rather than the final Orin performance path. `DiagnosticArray` reports requested, selected,
-and compiled backend state, solve time, stop reason, and cost terms.
+The default is 2048 rollouts, 48 steps, 0.05 s model time (2.4 s horizon), and 20 Hz. The
+controller rejects reverse/U-turn rollouts, penalizes insufficient terminal progress, and
+requires the configured horizon to cover the maximum-speed braking distance. Those rollout
+and horizon sizes are compile-time constants for CUDA; requesting different values with
+`backend=cuda` is rejected. The CPU backend uses OpenMP when available, but is a correctness
+reference rather than the final Orin performance path. `DiagnosticArray` reports requested,
+selected and compiled backend state, solve time, stop reason, cost terms, preview/progress,
+minimum clearance and braking distance. MPPI-Generic does not expose CUDA rollout validity
+counts, so that diagnostic is explicitly reported as unavailable rather than estimated.
 
 ## CUDA integration notes
 

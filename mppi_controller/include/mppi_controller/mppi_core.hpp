@@ -42,8 +42,8 @@ struct VehicleConfig
   double rear_overhang{0.124};
   double width{0.320};
   double safety_margin{0.05};
-  double min_steering{-0.20};
-  double max_steering{0.20};
+  double min_steering{-0.32};
+  double max_steering{0.32};
   double min_steering_rate{-1.5};
   double max_steering_rate{1.5};
   double min_acceleration{-1.5};
@@ -161,19 +161,47 @@ private:
   std::vector<double> distances_;
 };
 
+// A tracked dynamic (or static) obstacle in the map frame, moved by a
+// constant-velocity model during rollouts. The position at rollout time t is
+// (x + vx * (t + time_offset), y + vy * (t + time_offset)), where time_offset
+// is the age of the measurement relative to the rollout start so that stale
+// detections are extrapolated forward before the horizon even begins.
+struct Obstacle
+{
+  double x{0.0};
+  double y{0.0};
+  double yaw{0.0};
+  double vx{0.0};
+  double vy{0.0};
+  double half_length{0.0};
+  double half_width{0.0};
+  double time_offset{0.0};
+};
+
+// Smallest distance between the vehicle body (disk-chain cover, same
+// construction as the distance-field footprint check) and any obstacle
+// rectangle extrapolated to rollout time `time`. Infinity when there are no
+// obstacles; a conservative lower bound otherwise.
+[[nodiscard]] double obstacleClearance(
+  const State & state, const VehicleConfig & vehicle,
+  const std::vector<Obstacle> * obstacles, double time);
+
 struct CostWeights
 {
   double lateral{12.0};
-  double heading{3.0};
+  double heading{8.0};
   double lag{1.0};
-  double speed{2.0};
-  double progress{4.0};
+  double speed{50.0};
+  double progress{8.0};
   double control{0.15};
   double control_change{0.4};
   double lateral_acceleration{0.25};
   double boundary{250.0};
   double cbf{400.0};
   double collision{1.0e6};
+  double terminal_lateral{80.0};
+  double terminal_heading{60.0};
+  double terminal_progress{120.0};
 };
 
 struct CostBreakdown
@@ -189,6 +217,9 @@ struct CostBreakdown
   double boundary{0.0};
   double cbf{0.0};
   double collision{0.0};
+  double terminal_lateral{0.0};
+  double terminal_heading{0.0};
+  double terminal_progress{0.0};
 
   [[nodiscard]] double total() const noexcept;
 };
@@ -196,15 +227,19 @@ struct CostBreakdown
 struct MppiConfig
 {
   std::size_t rollout_count{2048U};
-  std::size_t horizon_steps{32U};
+  std::size_t horizon_steps{48U};
   double dt{0.05};
   double lambda{1.0};
   double steering_rate_stddev{0.8};
   double acceleration_stddev{0.8};
+  double pure_noise_fraction{0.05};
   std::uint32_t random_seed{7U};
   std::size_t nearest_search_radius{80U};
   double cbf_gamma{0.35};
-  double max_lateral_acceleration{4.0};
+  double max_lateral_acceleration{6.0};
+  double minimum_preview_distance{4.0};
+  double maximum_heading_error{1.20};
+  double reverse_progress_tolerance{0.05};
   std::size_t repair_steps{4U};
   std::size_t repair_iterations{2U};
   double repair_budget_ms{3.0};
@@ -215,11 +250,28 @@ struct MppiConfig
   CostWeights weights{};
 };
 
+struct TrajectoryMetrics
+{
+  double target_speed{0.0};
+  double preview_target{0.0};
+  double predicted_distance{0.0};
+  double forward_progress{0.0};
+  double maximum_heading_error{0.0};
+  double minimum_clearance{std::numeric_limits<double>::infinity()};
+  double minimum_obstacle_clearance{std::numeric_limits<double>::infinity()};
+  double stopping_distance{0.0};
+  std::size_t reverse_steps{0U};
+};
+
 struct MppiRequest
 {
   State initial_state{};
   const RaceLine * race_line{nullptr};
   const DistanceField * distance_field{nullptr};
+  // Obstacles already expressed in the map frame; each carries its own
+  // measurement age via Obstacle::time_offset. Null or empty means none.
+  const std::vector<Obstacle> * obstacles{nullptr};
+  double exploration_scale{1.0};
 };
 
 struct MppiResult
@@ -232,6 +284,9 @@ struct MppiResult
   CostBreakdown cost{};
   double solve_time_ms{0.0};
   std::size_t best_rollout{0U};
+  std::size_t rollout_count{0U};
+  std::optional<std::size_t> valid_rollouts;
+  TrajectoryMetrics metrics{};
 };
 
 class MppiBackend
@@ -269,17 +324,28 @@ public:
   [[nodiscard]] CostBreakdown evaluateTrajectory(
     const State & initial_state, const std::vector<Control> & controls,
     const RaceLine & race_line, const DistanceField * distance_field,
-    std::vector<State> * states = nullptr) const;
+    std::vector<State> * states = nullptr,
+    const std::vector<Obstacle> * obstacles = nullptr) const;
 
   [[nodiscard]] bool repairControls(
     const State & initial_state, std::vector<Control> & controls,
     const RaceLine & race_line, const DistanceField * distance_field,
-    std::chrono::steady_clock::time_point deadline) const;
+    std::chrono::steady_clock::time_point deadline,
+    const std::vector<Obstacle> * obstacles = nullptr) const;
+
+  [[nodiscard]] TrajectoryMetrics trajectoryMetrics(
+    const State & initial_state, const std::vector<State> & states,
+    const RaceLine & race_line, const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles = nullptr) const;
 
 private:
+  // `time` is the rollout-relative time of `state`; obstacles are evaluated at
+  // their constant-velocity extrapolation for that instant.
   [[nodiscard]] bool stateSafe(
     const State & state, const RaceLine & race_line,
-    const DistanceField * distance_field, std::size_t * hint = nullptr) const;
+    const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles, double time,
+    std::size_t * hint = nullptr) const;
   [[nodiscard]] double footprintClearance(
     const State & state, const DistanceField * distance_field) const;
 
@@ -298,6 +364,12 @@ std::unique_ptr<MppiBackend> makeCpuBackend(
 // linked into mppi_controller.  Finding CUDA headers or the vendor package alone is
 // deliberately not treated as availability.
 [[nodiscard]] bool cudaBackendCompiled() noexcept;
+
+// True when a CUDA device is present whose compute capability can execute the
+// architecture this library was compiled for.  Guards hardware-gated tests:
+// the vendor kernels abort the process instead of failing recoverably when
+// launched on an incompatible device.
+[[nodiscard]] bool cudaBackendDeviceCompatible() noexcept;
 
 // backend may be "auto", "cuda", "cpu", or the legacy "cpu_reference".
 // "auto" prefers the compiled CUDA backend and otherwise returns the CPU

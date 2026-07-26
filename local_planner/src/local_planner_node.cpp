@@ -5,6 +5,7 @@
 #include <cmath>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -17,6 +18,7 @@
 #include "local_planner/frenet_planner.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "roboracer_msgs/msg/race_state.hpp"
 #include "roboracer_msgs/msg/tracked_obstacle_array.hpp"
 #include "roboracer_msgs/msg/trajectory.hpp"
 #include "std_msgs/msg/header.hpp"
@@ -57,13 +59,17 @@ public:
       "output_topic", "/planner/local_trajectory");
     const auto marker_topic = declare_parameter<std::string>(
       "marker_topic", "/planner/candidate_markers");
+    const auto race_state_topic = declare_parameter<std::string>(
+      "race_state_topic", "/race_manager/state");
     const auto race_line_file = declare_parameter<std::string>(
       "race_line_file", "");
     target_frame_ = declare_parameter<std::string>("target_frame", "map");
     trajectory_source_ = declare_parameter<std::string>(
-      "trajectory_source", "frenet_quintic");
+      "trajectory_source", "frenet_quintic_boundary");
     state_timeout_ = declare_parameter<double>("state_timeout", 0.10);
     obstacle_timeout_ = declare_parameter<double>("obstacle_timeout", 0.15);
+    race_state_timeout_ =
+      declare_parameter<double>("race_state_timeout", 0.25);
     const double publish_rate =
       declare_parameter<double>("publish_rate_hz", 30.0);
     const int projection_search_radius =
@@ -83,8 +89,6 @@ public:
       static_cast<std::size_t>(lateral_samples_per_side) : 0U;
     config.sample_spacing =
       declare_parameter<double>("sample_spacing", 0.10);
-    config.transition_length =
-      declare_parameter<double>("transition_length", 2.0);
     config.overtake_offset =
       declare_parameter<double>("overtake_offset", 0.45);
     config.minimum_lateral_offset =
@@ -96,6 +100,8 @@ public:
       static_cast<std::size_t>(projection_search_radius) : 0U;
     config.max_projection_distance =
       declare_parameter<double>("max_projection_distance", 1.0);
+    config.max_projection_heading_error =
+      declare_parameter<double>("max_projection_heading_error", 1.0471976);
     config.minimum_frenet_jacobian =
       declare_parameter<double>("minimum_frenet_jacobian", 0.20);
 
@@ -103,6 +109,8 @@ public:
       declare_parameter<double>("vehicle_length", 0.552);
     config.vehicle_width =
       declare_parameter<double>("vehicle_width", 0.320);
+    config.rear_overhang =
+      declare_parameter<double>("rear_overhang", 0.124);
     config.safety_margin =
       declare_parameter<double>("safety_margin", 0.05);
     config.collision_margin =
@@ -123,6 +131,8 @@ public:
       declare_parameter<double>("max_acceleration", 1.0);
     config.max_curvature =
       declare_parameter<double>("max_curvature", 1.0);
+    config.trailing_stop_margin =
+      declare_parameter<double>("trailing_stop_margin", 0.40);
 
     config.weight_lateral_offset =
       declare_parameter<double>("weight_lateral_offset", 2.0);
@@ -136,12 +146,15 @@ public:
       declare_parameter<double>("weight_speed", 1.0);
     config.weight_horizon =
       declare_parameter<double>("weight_horizon", 0.5);
+    config.weight_stop =
+      declare_parameter<double>("weight_stop", 2.0);
 
     if (race_line_file.empty()) {
       throw std::invalid_argument("race_line_file is required");
     }
     if (!finite(state_timeout_) || state_timeout_ <= 0.0 ||
       !finite(obstacle_timeout_) || obstacle_timeout_ <= 0.0 ||
+      !finite(race_state_timeout_) || race_state_timeout_ <= 0.0 ||
       !finite(publish_rate) || publish_rate <= 0.0 ||
       target_frame_.empty())
     {
@@ -171,6 +184,12 @@ public:
       odom_topic, rclcpp::QoS(rclcpp::KeepLast(5)).reliable(),
       [this](nav_msgs::msg::Odometry::ConstSharedPtr message) {
         latest_odom_ = std::move(message);
+      });
+    race_state_subscription_ =
+      create_subscription<roboracer_msgs::msg::RaceState>(
+      race_state_topic, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+      [this](roboracer_msgs::msg::RaceState::ConstSharedPtr message) {
+        latest_race_state_ = std::move(message);
       });
 
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -229,12 +248,18 @@ private:
     ego.speed = std::hypot(
       latest_odom_->twist.twist.linear.x,
       latest_odom_->twist.twist.linear.y);
+    if (ego.speed > 0.20 &&
+      finite(latest_odom_->twist.twist.angular.z))
+    {
+      ego.curvature = latest_odom_->twist.twist.angular.z / ego.speed;
+    }
 
     std::vector<Obstacle> obstacles;
     obstacles.reserve(latest_obstacles_->obstacles.size());
     for (const auto & message : latest_obstacles_->obstacles) {
       Obstacle obstacle;
       obstacle.id = message.id;
+      obstacle.classification = message.classification;
       obstacle.x = message.x;
       obstacle.y = message.y;
       obstacle.yaw = message.yaw;
@@ -249,8 +274,40 @@ private:
 
     PlanResult result;
     try {
+      std::optional<int> preferred_side;
+      bool return_to_raceline = false;
+      double behavior_speed_scale = 1.0;
+      double race_state_age = std::numeric_limits<double>::infinity();
+      if (latest_race_state_) {
+        race_state_age =
+          (get_clock()->now() -
+          rclcpp::Time(latest_race_state_->header.stamp)).seconds();
+      }
+      const bool race_state_fresh =
+        finite(race_state_age) && race_state_age >= 0.0 &&
+        race_state_age <= race_state_timeout_;
+      if (race_state_fresh) {
+        if (latest_race_state_->state ==
+          roboracer_msgs::msg::RaceState::OVERTAKE &&
+          latest_race_state_->preferred_side !=
+          roboracer_msgs::msg::RaceState::SIDE_NONE)
+        {
+          preferred_side =
+            static_cast<int>(latest_race_state_->preferred_side);
+        }
+        return_to_raceline =
+          latest_race_state_->state ==
+          roboracer_msgs::msg::RaceState::RETURN;
+        if (finite(latest_race_state_->speed_scale) &&
+          latest_race_state_->speed_scale > 0.0 &&
+          latest_race_state_->speed_scale <= 1.0)
+        {
+          behavior_speed_scale = latest_race_state_->speed_scale;
+        }
+      }
       result = planner_->plan(
-        ego, obstacles, projection_hint_, previous_target_d_);
+        ego, obstacles, projection_hint_, previous_target_d_,
+        preferred_side, return_to_raceline, behavior_speed_scale);
     } catch (const std::exception & exception) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 1000,
@@ -262,6 +319,10 @@ private:
     if (result.valid) {
       previous_target_d_ =
         result.candidates[result.selected_index].target_d;
+    } else {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "No valid local trajectory: %s", result.reason.c_str());
     }
 
     roboracer_msgs::msg::Trajectory output;
@@ -325,8 +386,7 @@ private:
     std::size_t boundary_count = 0U;
     std::size_t curvature_count = 0U;
     std::size_t other_invalid_count = 0U;
-    for (std::size_t index = 0U; index < result.candidates.size(); ++index) {
-      const auto & candidate = result.candidates[index];
+    for (const auto & candidate : result.candidates) {
       if (candidate.valid) {
         ++valid_count;
       } else if (candidate.reason == "collision") {
@@ -338,6 +398,35 @@ private:
       } else {
         ++other_invalid_count;
       }
+    }
+
+    std::vector<std::size_t> displayed_indices;
+    for (std::size_t index = 0U; index < result.candidates.size(); ++index) {
+      const auto & candidate = result.candidates[index];
+      const auto existing = std::find_if(
+        displayed_indices.begin(), displayed_indices.end(),
+        [&result, &candidate](std::size_t displayed_index) {
+          const auto & displayed = result.candidates[displayed_index];
+          return std::abs(displayed.target_d - candidate.target_d) < 1.0e-6 &&
+          std::abs(displayed.horizon - candidate.horizon) < 1.0e-6;
+        });
+      if (existing == displayed_indices.end()) {
+        displayed_indices.push_back(index);
+      } else {
+        const auto & displayed = result.candidates[*existing];
+        const bool candidate_is_selected =
+          result.valid && index == result.selected_index;
+        const bool candidate_is_better =
+          candidate.valid &&
+          (!displayed.valid || candidate.cost < displayed.cost);
+        if (candidate_is_selected || candidate_is_better) {
+          *existing = index;
+        }
+      }
+    }
+
+    for (const std::size_t index : displayed_indices) {
+      const auto & candidate = result.candidates[index];
       visualization_msgs::msg::Marker line;
       line.header = header;
       line.ns = "frenet_candidates";
@@ -415,6 +504,7 @@ private:
       summary.color.a = 1.0F;
       std::ostringstream text;
       text << "total=" << result.candidates.size()
+           << " geometry=" << displayed_indices.size()
            << " valid=" << valid_count
            << " collision=" << collision_count
            << " boundary=" << boundary_count
@@ -430,17 +520,21 @@ private:
   std::string trajectory_source_;
   double state_timeout_{0.10};
   double obstacle_timeout_{0.15};
+  double race_state_timeout_{0.25};
   std::unique_ptr<FrenetPlanner> planner_;
   std::optional<std::size_t> projection_hint_;
   std::optional<double> previous_target_d_;
   nav_msgs::msg::Odometry::ConstSharedPtr latest_odom_;
   roboracer_msgs::msg::TrackedObstacleArray::ConstSharedPtr latest_obstacles_;
+  roboracer_msgs::msg::RaceState::ConstSharedPtr latest_race_state_;
   rclcpp::Publisher<roboracer_msgs::msg::Trajectory>::SharedPtr publisher_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
     marker_publisher_;
   rclcpp::Subscription<roboracer_msgs::msg::TrackedObstacleArray>::SharedPtr
     obstacles_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
+  rclcpp::Subscription<roboracer_msgs::msg::RaceState>::SharedPtr
+    race_state_subscription_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

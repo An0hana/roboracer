@@ -30,6 +30,8 @@ struct FrenetProjection
   double s{0.0};
   double d{0.0};
   double distance{0.0};
+  double reference_yaw{0.0};
+  double heading_error{0.0};
 };
 
 class ReferenceLine
@@ -45,7 +47,9 @@ public:
   [[nodiscard]] ReferencePoint sample(double s) const;
   [[nodiscard]] FrenetProjection project(
     double x, double y, std::optional<std::size_t> hint = std::nullopt,
-    std::size_t search_radius = 60U) const;
+    std::size_t search_radius = 60U,
+    std::optional<double> yaw = std::nullopt,
+    double maximum_heading_error = 3.14159265358979323846) const;
 
 private:
   explicit ReferenceLine(std::vector<ReferencePoint> points);
@@ -63,11 +67,13 @@ struct EgoState
   double y{0.0};
   double yaw{0.0};
   double speed{0.0};
+  std::optional<double> curvature;
 };
 
 struct Obstacle
 {
   std::int32_t id{-1};
+  std::uint8_t classification{0U};
   double x{0.0};
   double y{0.0};
   double yaw{0.0};
@@ -99,8 +105,10 @@ struct CandidateTrajectory
   double target_d{0.0};
   double horizon{0.0};
   double speed_scale{1.0};
+  double stop_distance{0.0};
   double cost{0.0};
   bool valid{false};
+  bool stopping{false};
   std::string reason;
   std::vector<TrajectorySample> points;
 };
@@ -108,6 +116,7 @@ struct CandidateTrajectory
 struct PlanResult
 {
   bool valid{false};
+  std::string reason{"no_valid_candidate"};
   std::size_t selected_index{0U};
   std::size_t projection_index{0U};
   double ego_s{0.0};
@@ -121,16 +130,17 @@ struct FrenetPlannerConfig
   std::vector<double> speed_scales{0.60, 0.80, 1.00};
   std::size_t lateral_samples_per_side{3U};
   double sample_spacing{0.10};
-  double transition_length{2.0};
   double overtake_offset{0.45};
   double minimum_lateral_offset{0.10};
   double boundary_sampling_buffer{0.01};
   std::size_t projection_search_radius{60U};
   double max_projection_distance{1.0};
+  double max_projection_heading_error{1.0471975511965976};
   double minimum_frenet_jacobian{0.20};
 
   double vehicle_length{0.552};
   double vehicle_width{0.320};
+  double rear_overhang{0.124};
   double safety_margin{0.05};
   double collision_margin{0.08};
   double default_opponent_length{0.552};
@@ -142,6 +152,7 @@ struct FrenetPlannerConfig
   double min_acceleration{-1.5};
   double max_acceleration{1.0};
   double max_curvature{1.0};
+  double trailing_stop_margin{0.40};
 
   double weight_lateral_offset{2.0};
   double weight_curvature{1.0};
@@ -149,6 +160,7 @@ struct FrenetPlannerConfig
   double weight_switch{3.0};
   double weight_speed{1.0};
   double weight_horizon{0.5};
+  double weight_stop{2.0};
 };
 
 class FrenetPlanner
@@ -159,19 +171,30 @@ public:
   [[nodiscard]] PlanResult plan(
     const EgoState & ego, const std::vector<Obstacle> & obstacles,
     std::optional<std::size_t> projection_hint = std::nullopt,
-    std::optional<double> previous_target_d = std::nullopt) const;
+    std::optional<double> previous_target_d = std::nullopt,
+    std::optional<int> preferred_side = std::nullopt,
+    bool return_to_raceline = false,
+    double behavior_speed_scale = 1.0) const;
 
   [[nodiscard]] const ReferenceLine & referenceLine() const noexcept;
 
 private:
   [[nodiscard]] std::vector<double> lateralOffsets(
-    const FrenetProjection & projection) const;
+    const FrenetProjection & projection,
+    std::optional<int> preferred_side,
+    bool return_to_raceline) const;
 
   [[nodiscard]] CandidateTrajectory generateCandidate(
-    const FrenetProjection & projection, double target_d, double horizon,
+    const EgoState & ego, const FrenetProjection & projection,
+    double target_d, double horizon,
     double speed_scale, const std::string & name,
     const std::vector<Obstacle> & obstacles,
     std::optional<double> previous_target_d) const;
+
+  [[nodiscard]] bool hasRequiredPassingClearance(
+    const FrenetProjection & projection,
+    const CandidateTrajectory & candidate,
+    const std::vector<Obstacle> & obstacles) const;
 
   ReferenceLine reference_line_;
   FrenetPlannerConfig config_;

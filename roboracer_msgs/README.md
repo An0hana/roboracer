@@ -15,6 +15,6 @@
 - `TrackedObstacleArray`：同一时刻的障碍物集合。
 - `TrajectoryPoint`：带速度、曲率和赛道宽度的轨迹点。
 - `Trajectory`：全局参考线或局部避障轨迹。
-- `RaceState`：比赛战术与故障状态。
+- `RaceState`：比赛战术、超车方向、速度比例、轨迹选择与FTG降级状态。
 
 完整话题、TF、QoS 和职责约定见仓库根目录 `INTERFACES.md`。

@@ -1,10 +1,10 @@
 mppi_controller:
   ros__parameters:
-    # auto selects CUDA only when the .cu backend was actually compiled;
-    # otherwise it truthfully falls back to cpu_reference.
-    backend: auto
-    odom_topic: /state_estimation/odom
-    map_topic: /map
+    # Simulation and vehicle deployment both require CUDA. Configuration fails
+    # instead of silently falling back when the backend is unavailable.
+    backend: cuda
+    odom_topic: /ego_racecar/odom
+    costmap_topic: /perception/local_costmap
     command_topic: /control/mppi_cmd
     path_topic: /control/mppi_path
     diagnostics_topic: /diagnostics
@@ -13,27 +13,46 @@ mppi_controller:
     race_line_file: ""
     control_frequency: 20.0
     state_timeout: 0.10
+    costmap_timeout: 0.10
+    # The scan costmap remains available at 40 Hz; distance transform and CUDA
+    # upload only need to match the 20 Hz controller.
+    costmap_processing_frequency: 20.0
     output_timeout: 0.10
     tf_timeout: 0.02
     max_solve_time_ms: 40.0
     localization_position_jump_threshold: 0.50
     localization_yaw_jump_threshold: 0.70
     localization_jump_hold_time: 0.50
-    require_map: true
+    require_costmap: true
     occupied_threshold: 50
-    unknown_is_occupied: true
+    unknown_is_occupied: false
+    # Tracked opponents enter every rollout step as constant-velocity
+    # extrapolations. Stale data degrades to costmap-only avoidance (WARN),
+    # never to a stop: an empty track legitimately publishes nothing.
+    obstacles_topic: /perception/obstacles
+    obstacles_timeout: 0.20
+    max_obstacle_count: 8
+    min_obstacle_confidence: 0.25
 
     mppi:
       rollout_count: 2048
-      horizon_steps: 32
+      # 2.4 s horizon at 20 Hz control: enough to keep a meaningful spatial
+      # preview while accelerating from low speed.
+      horizon_steps: 48
       dt: 0.05
       lambda: 1.0
-      steering_rate_stddev: 0.8
+      steering_rate_stddev: 0.5
       acceleration_stddev: 0.8
+      pure_noise_fraction: 0.05
+      near_obstacle_distance: 0.50
+      near_obstacle_exploration_scale: 1.50
       random_seed: 7
       nearest_search_radius: 80
       cbf_gamma: 0.35
-      max_lateral_acceleration: 4.0
+      max_lateral_acceleration: 6.0
+      minimum_preview_distance: 4.0
+      maximum_heading_error: 1.20
+      reverse_progress_tolerance: 0.05
       repair_steps: 4
       repair_iterations: 2
       repair_budget_ms: 3.0
@@ -49,8 +68,8 @@ mppi_controller:
       rear_overhang: 0.124
       width: 0.320
       safety_margin: 0.05
-      min_steering: -0.20
-      max_steering: 0.20
+      min_steering: -0.32
+      max_steering: 0.32
       min_steering_rate: -1.5
       max_steering_rate: 1.5
       min_acceleration: -1.5
@@ -60,16 +79,18 @@ mppi_controller:
 
     weights:
       lateral: 12.0
-      heading: 3.0
+      heading: 8.0
       lag: 1.0
-      # The CUDA sampler otherwise settles into the zero-speed local minimum
-      # when starting from rest. Keep forward-speed tracking strong enough to
-      # produce a positive launch acceleration at the 0.5 m/s simulation cap.
+      # Prevent the sampler from settling into the zero-speed local minimum
+      # when starting from rest.
       speed: 50.0
-      progress: 4.0
+      progress: 8.0
       control: 0.15
       control_change: 0.4
       lateral_acceleration: 0.25
-      boundary: 250.0
+      boundary: 600.0
       cbf: 400.0
       collision: 1000000.0
+      terminal_lateral: 80.0
+      terminal_heading: 60.0
+      terminal_progress: 120.0
