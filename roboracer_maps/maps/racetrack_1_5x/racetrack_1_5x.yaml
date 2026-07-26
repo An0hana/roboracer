@@ -1,0 +1,7 @@
+image: racetrack_1_5x.pgm
+mode: trinary
+resolution: 0.075
+origin: [-12.99, -6.195, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25

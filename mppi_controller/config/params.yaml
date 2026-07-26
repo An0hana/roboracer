@@ -1,0 +1,75 @@
+mppi_controller:
+  ros__parameters:
+    # auto selects CUDA only when the .cu backend was actually compiled;
+    # otherwise it truthfully falls back to cpu_reference.
+    backend: auto
+    odom_topic: /state_estimation/odom
+    map_topic: /map
+    command_topic: /control/mppi_cmd
+    path_topic: /control/mppi_path
+    diagnostics_topic: /diagnostics
+    map_frame: map
+    base_frame: base_link
+    race_line_file: ""
+    control_frequency: 20.0
+    state_timeout: 0.10
+    output_timeout: 0.10
+    tf_timeout: 0.02
+    max_solve_time_ms: 40.0
+    localization_position_jump_threshold: 0.50
+    localization_yaw_jump_threshold: 0.70
+    localization_jump_hold_time: 0.50
+    require_map: true
+    occupied_threshold: 50
+    unknown_is_occupied: true
+
+    mppi:
+      rollout_count: 2048
+      horizon_steps: 32
+      dt: 0.05
+      lambda: 1.0
+      steering_rate_stddev: 0.8
+      acceleration_stddev: 0.8
+      random_seed: 7
+      nearest_search_radius: 80
+      cbf_gamma: 0.35
+      max_lateral_acceleration: 4.0
+      repair_steps: 4
+      repair_iterations: 2
+      repair_budget_ms: 3.0
+      repair_clearance: 0.05
+
+    cuda:
+      # Preallocated once during lifecycle configure (4M float cells = 16 MiB).
+      max_map_cells: 4194304
+
+    vehicle:
+      wheelbase: 0.324
+      length: 0.552
+      rear_overhang: 0.124
+      width: 0.320
+      safety_margin: 0.05
+      min_steering: -0.20
+      max_steering: 0.20
+      min_steering_rate: -1.5
+      max_steering_rate: 1.5
+      min_acceleration: -1.5
+      max_acceleration: 1.0
+      min_speed: 0.0
+      max_speed: 2.0
+
+    weights:
+      lateral: 12.0
+      heading: 3.0
+      lag: 1.0
+      # The CUDA sampler otherwise settles into the zero-speed local minimum
+      # when starting from rest. Keep forward-speed tracking strong enough to
+      # produce a positive launch acceleration at the 0.5 m/s simulation cap.
+      speed: 50.0
+      progress: 4.0
+      control: 0.15
+      control_change: 0.4
+      lateral_acceleration: 0.25
+      boundary: 250.0
+      cbf: 400.0
+      collision: 1000000.0

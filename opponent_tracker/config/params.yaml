@@ -1,0 +1,54 @@
+opponent_tracker:
+  ros__parameters:
+    scan_topic: /scan
+    odom_topic: /state_estimation/odom
+    measurement_topic: /perception/obstacles_measurement
+    output_topic: /perception/obstacles
+    marker_topic: /perception/obstacle_markers
+    target_frame: map
+    publish_rate_hz: 50.0
+    prediction_publish_rate_hz: 100.0
+    max_prediction_age: 0.15
+    transform_timeout: 0.005
+
+    map_topic: /map
+    use_map_filter: true
+    map_filter_radius: 0.12
+    map_occupied_threshold: 50
+    map_unknown_is_occupied: true
+
+    min_range: 0.05
+    max_range: 15.0
+    breakpoint_base: 0.06
+    breakpoint_scale: 2.0
+    min_cluster_points: 3
+
+    min_object_length: 0.05
+    max_object_length: 1.0
+    max_object_width: 0.8
+    min_box_dimension: 0.04
+    confidence_full_points: 20
+
+    association_distance: 0.75
+    min_confirmed_hits: 3
+    max_missed_time: 0.30
+    tracking_process_noise: 4.0
+    tracking_measurement_noise: 0.04
+    initial_velocity_stddev: 2.0
+    shape_smoothing: 0.25
+    dynamic_speed_threshold: 0.15
+    heading_enter_speed: 0.18
+    heading_exit_speed: 0.08
+    heading_smoothing: 0.35
+    max_yaw_rate: 2.5
+    max_prediction_dt: 0.10
+
+    marker_height: 0.20
+    marker_velocity_scale: 0.75
+    # 仿真已知车型用 true；实车未知对手尺寸先用 false。
+    use_known_opponent_size: true
+    opponent_length: 0.552
+    opponent_width: 0.320
+    center_fit_support_quantile: 0.10
+    center_fit_lateral_ratio_threshold: 0.15
+    marker_history_length: 50

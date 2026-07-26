@@ -20,7 +20,7 @@ class FTGNode : public rclcpp::Node
 {
 public:
   FTGNode()
-  : Node("ftg_node")
+  : Node("ftg_controller")
   {
     const std::string scan_topic = declare_parameter<std::string>("scan_topic", "/scan");
     const std::string drive_topic = declare_parameter<std::string>("drive_topic", "/drive");
@@ -44,7 +44,7 @@ public:
     planner_config.continuity_weight = nonnegativeParameter("continuity_weight", 0.5);
     planner_config.gap_switch_hysteresis = boundedParameter(
       "gap_switch_hysteresis", 0.10, 0.0, 1.0);
-    planner_config.lidar_offset = nonnegativeParameter("lidar_offset", 0.275);
+    planner_config.lidar_offset = nonnegativeParameter("lidar_offset", 0.250);
     planner_config.min_lookahead = positiveParameter("min_lookahead", 0.8);
     planner_config.max_lookahead = positiveParameter("max_lookahead", 2.0);
     if (planner_config.max_lookahead < planner_config.min_lookahead) {
@@ -52,7 +52,7 @@ public:
         get_logger(), "max_lookahead is smaller than min_lookahead; clamping it");
       planner_config.max_lookahead = planner_config.min_lookahead;
     }
-    planner_config.wheelbase = positiveParameter("wheelbase", 0.33);
+    planner_config.wheelbase = positiveParameter("wheelbase", 0.324);
     planner_config.path_sweep_radius = positiveParameter(
       "path_sweep_radius", planner_config.safety_radius);
     planner_config.path_horizon = positiveParameter("path_horizon", 3.0);
@@ -248,7 +248,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr subscriber_;
   rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr publisher_;
   double nominal_scan_period_{0.004};
-  double wheelbase_{0.33};
+  double wheelbase_{0.324};
   double emergency_distance_{0.45};
   std::optional<std::int64_t> last_update_ns_;
 };

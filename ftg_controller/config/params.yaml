@@ -1,4 +1,4 @@
-ftg_node:
+/**:
   ros__parameters:
     # Hardware I/O. The controller uses LaserScan as its only sensor input.
     scan_topic: "/scan"
@@ -27,7 +27,7 @@ ftg_node:
 
     # Vehicle geometry and swept-path evaluation.
     wheelbase: 0.324
-    lidar_offset: 0.275
+    lidar_offset: 0.250
     min_lookahead: 0.8
     max_lookahead: 2.0
     path_sweep_radius: 0.35

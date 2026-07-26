@@ -1,0 +1,44 @@
+local_planner:
+  ros__parameters:
+    obstacles_topic: /perception/obstacles
+    odom_topic: /state_estimation/odom
+    output_topic: /planner/local_trajectory
+    marker_topic: /planner/candidate_markers
+    target_frame: map
+    trajectory_source: frenet_quintic
+    publish_rate_hz: 30.0
+    state_timeout: 0.10
+    obstacle_timeout: 0.15
+
+    planning_horizons: [3.0, 4.0, 5.0]
+    speed_scales: [0.60, 0.80, 1.00]
+    lateral_samples_per_side: 3
+    sample_spacing: 0.10
+    transition_length: 2.0
+    overtake_offset: 0.45
+    minimum_lateral_offset: 0.10
+    boundary_sampling_buffer: 0.01
+    projection_search_radius: 60
+    max_projection_distance: 1.0
+    minimum_frenet_jacobian: 0.20
+
+    vehicle_length: 0.552
+    vehicle_width: 0.320
+    safety_margin: 0.05
+    collision_margin: 0.08
+    default_opponent_length: 0.552
+    default_opponent_width: 0.320
+    minimum_obstacle_confidence: 0.05
+
+    max_speed: 4.0
+    max_lateral_acceleration: 4.0
+    min_acceleration: -1.5
+    max_acceleration: 1.0
+    max_curvature: 1.0
+
+    weight_lateral_offset: 2.0
+    weight_curvature: 1.0
+    weight_clearance: 0.20
+    weight_switch: 3.0
+    weight_speed: 1.0
+    weight_horizon: 0.5
