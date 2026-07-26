@@ -42,8 +42,8 @@ struct VehicleConfig
   double rear_overhang{0.124};
   double width{0.320};
   double safety_margin{0.05};
-  double min_steering{-0.20};
-  double max_steering{0.20};
+  double min_steering{-0.32};
+  double max_steering{0.32};
   double min_steering_rate{-1.5};
   double max_steering_rate{1.5};
   double min_acceleration{-1.5};
@@ -164,16 +164,19 @@ private:
 struct CostWeights
 {
   double lateral{12.0};
-  double heading{3.0};
+  double heading{8.0};
   double lag{1.0};
-  double speed{2.0};
-  double progress{4.0};
+  double speed{50.0};
+  double progress{8.0};
   double control{0.15};
   double control_change{0.4};
   double lateral_acceleration{0.25};
   double boundary{250.0};
   double cbf{400.0};
   double collision{1.0e6};
+  double terminal_lateral{80.0};
+  double terminal_heading{60.0};
+  double terminal_progress{120.0};
 };
 
 struct CostBreakdown
@@ -189,6 +192,9 @@ struct CostBreakdown
   double boundary{0.0};
   double cbf{0.0};
   double collision{0.0};
+  double terminal_lateral{0.0};
+  double terminal_heading{0.0};
+  double terminal_progress{0.0};
 
   [[nodiscard]] double total() const noexcept;
 };
@@ -196,15 +202,19 @@ struct CostBreakdown
 struct MppiConfig
 {
   std::size_t rollout_count{2048U};
-  std::size_t horizon_steps{32U};
+  std::size_t horizon_steps{48U};
   double dt{0.05};
   double lambda{1.0};
   double steering_rate_stddev{0.8};
   double acceleration_stddev{0.8};
+  double pure_noise_fraction{0.05};
   std::uint32_t random_seed{7U};
   std::size_t nearest_search_radius{80U};
   double cbf_gamma{0.35};
-  double max_lateral_acceleration{4.0};
+  double max_lateral_acceleration{6.0};
+  double minimum_preview_distance{4.0};
+  double maximum_heading_error{1.20};
+  double reverse_progress_tolerance{0.05};
   std::size_t repair_steps{4U};
   std::size_t repair_iterations{2U};
   double repair_budget_ms{3.0};
@@ -215,11 +225,24 @@ struct MppiConfig
   CostWeights weights{};
 };
 
+struct TrajectoryMetrics
+{
+  double target_speed{0.0};
+  double preview_target{0.0};
+  double predicted_distance{0.0};
+  double forward_progress{0.0};
+  double maximum_heading_error{0.0};
+  double minimum_clearance{std::numeric_limits<double>::infinity()};
+  double stopping_distance{0.0};
+  std::size_t reverse_steps{0U};
+};
+
 struct MppiRequest
 {
   State initial_state{};
   const RaceLine * race_line{nullptr};
   const DistanceField * distance_field{nullptr};
+  double exploration_scale{1.0};
 };
 
 struct MppiResult
@@ -232,6 +255,9 @@ struct MppiResult
   CostBreakdown cost{};
   double solve_time_ms{0.0};
   std::size_t best_rollout{0U};
+  std::size_t rollout_count{0U};
+  std::optional<std::size_t> valid_rollouts;
+  TrajectoryMetrics metrics{};
 };
 
 class MppiBackend
@@ -275,6 +301,10 @@ public:
     const State & initial_state, std::vector<Control> & controls,
     const RaceLine & race_line, const DistanceField * distance_field,
     std::chrono::steady_clock::time_point deadline) const;
+
+  [[nodiscard]] TrajectoryMetrics trajectoryMetrics(
+    const State & initial_state, const std::vector<State> & states,
+    const RaceLine & race_line, const DistanceField * distance_field) const;
 
 private:
   [[nodiscard]] bool stateSafe(

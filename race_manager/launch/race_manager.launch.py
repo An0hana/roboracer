@@ -11,9 +11,21 @@ def generate_launch_description():
         get_package_share_directory("race_manager"), "config", "params.yaml"
     )
     params_file = LaunchConfiguration("params_file")
+    odom_topic = LaunchConfiguration("odom_topic")
+    use_sim_time = LaunchConfiguration("use_sim_time")
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "odom_topic",
+                default_value="/state_estimation/odom",
+                description="Vehicle localization topic",
+            ),
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="false",
+                description="Use ROS simulation clock",
+            ),
             DeclareLaunchArgument(
                 "params_file",
                 default_value=default_params,
@@ -24,7 +36,13 @@ def generate_launch_description():
                 executable="race_manager_node",
                 name="race_manager",
                 output="screen",
-                parameters=[params_file],
+                parameters=[
+                    params_file,
+                    {
+                        "odom_topic": odom_topic,
+                        "use_sim_time": use_sim_time,
+                    },
+                ],
             ),
         ]
     )

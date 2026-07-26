@@ -40,12 +40,8 @@ endif()
 # The vendored dependency advertises whether the exact pinned MPPI-Generic build
 # exists.  Merely finding nvcc is not enough to claim that the backend is usable.
 find_package(mppi_generic_vendor QUIET)
-set(_mppi_controller_cuda_default OFF)
-if(mppi_generic_vendor_FOUND AND mppi_generic_vendor_CUDA_BUILT)
-  set(_mppi_controller_cuda_default ON)
-endif()
 option(MPPI_CONTROLLER_ENABLE_CUDA "Build the pinned MPPI-Generic CUDA backend"
-  ${_mppi_controller_cuda_default})
+  ON)
 if(MPPI_CONTROLLER_ENABLE_CUDA AND NOT
   (mppi_generic_vendor_FOUND AND mppi_generic_vendor_CUDA_BUILT))
   message(FATAL_ERROR
