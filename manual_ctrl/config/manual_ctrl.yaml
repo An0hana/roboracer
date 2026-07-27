@@ -1,0 +1,40 @@
+manual_ctrl:
+  ros__parameters:
+    gamepad_device: "/dev/input/event1"   # ls /dev/input/by-id to find yours
+    rate: 50.0
+    max_rpm: 5000
+    deadzone: 0.08
+    smoothing: 0.15
+    stale_timeout: 0.5                     # zero motor if gamepad goes quiet [s]
+
+    # Motor command units MUST match your autonomous stack. If
+    # ackermann_to_vesc publishes ERPM on /commands/motor/speed, use "speed".
+    motor_mode: "speed"                    # speed | duty_cycle | current
+    motor_scale: 1.0
+    duty_limit: 0.20
+    current_limit: 3.0
+
+    # Steering servo mapping (preserved from the original manual-ctrl).
+    servo_center: 0.48
+    servo_span: 0.35
+    servo_min: 0.15
+    servo_max: 0.85
+
+    manual_motor_topic: "/manual/motor"
+    manual_servo_topic: "/manual/servo"
+    takeover_topic: "/manual/takeover"
+
+manual_mux:
+  ros__parameters:
+    autonomous_motor_topic: "/autonomous/motor"
+    autonomous_servo_topic: "/autonomous/servo"
+    manual_motor_topic: "/manual/motor"
+    manual_servo_topic: "/manual/servo"
+    takeover_topic: "/manual/takeover"
+
+    # The real VESC command topics. Nothing else should publish here.
+    motor_out_topic: "/commands/motor/speed"
+    servo_out_topic: "/commands/servo/position"
+
+    command_timeout: 0.3                   # coast to stop if source silent [s]
+    servo_center: 0.48
