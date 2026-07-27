@@ -26,6 +26,8 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>local_costmap</exec_depend>
+  <exec_depend>opponent_tracker</exec_depend>
+  <exec_depend>state_machine</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

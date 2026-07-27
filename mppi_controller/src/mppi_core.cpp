@@ -848,8 +848,11 @@ bool CpuMppiBackend::warmup(const RaceLine & race_line, const DistanceField * di
 CostBreakdown CpuMppiBackend::evaluateTrajectory(
   const State & initial_state, const std::vector<Control> & controls,
   const RaceLine & race_line, const DistanceField * distance_field,
-  std::vector<State> * states, const std::vector<Obstacle> * obstacles) const
+  std::vector<State> * states, const std::vector<Obstacle> * obstacles,
+  const MppiBehavior * behavior) const
 {
+  const MppiBehavior neutral;
+  const MppiBehavior & adaptive = behavior == nullptr ? neutral : *behavior;
   CostBreakdown cost;
   State state = model_.clampState(initial_state);
   std::size_t hint = race_line.nearestIndex(state.x, state.y);
@@ -889,10 +892,16 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     const double lateral_acceleration =
       state.speed * state.speed * std::tan(state.steering) / vehicle_.wheelbase;
 
-    cost.lateral += config_.weights.lateral * square(projection.lateral_error);
-    cost.heading += config_.weights.heading * square(projection.heading_error);
-    cost.lag += config_.weights.lag * square(projection.longitudinal_error);
-    const double target_speed = std::min(reference.reference_speed, vehicle_.max_speed);
+    const double lateral_error =
+      projection.lateral_error - adaptive.lateral_reference_offset;
+    cost.lateral += config_.weights.lateral * adaptive.raceline_weight_scale *
+      square(lateral_error);
+    cost.heading += config_.weights.heading * adaptive.raceline_weight_scale *
+      square(projection.heading_error);
+    cost.lag += config_.weights.lag * adaptive.raceline_weight_scale *
+      square(projection.longitudinal_error);
+    const double target_speed =
+      std::min(reference.reference_speed, vehicle_.max_speed) * adaptive.speed_scale;
     cost.speed += config_.weights.speed * square(state.speed - target_speed);
     cost.progress -= config_.weights.progress * progress;
     cost.control += config_.weights.control *
@@ -906,7 +915,10 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
       (square(lateral_acceleration) + 20.0 * square(excess_lateral_acceleration));
     // Race-line widths are a soft global preference only. The live scan-derived
     // distance field is the authoritative collision boundary.
-    cost.boundary += config_.weights.boundary * square(std::max(0.0, -track_h));
+    // The CSV widths are prior geometry, so their influence falls together
+    // with race-line confidence. Live scan/CBF safety is scaled separately.
+    cost.boundary += config_.weights.boundary * adaptive.raceline_weight_scale *
+      square(std::max(0.0, -track_h));
     const double map_cbf = barrierViolation(previous_map_h, map_h, config_.cbf_gamma);
     double map_soft_barrier = 0.0;
     if ((distance_field != nullptr && distance_field->valid()) ||
@@ -915,7 +927,7 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
       const double barrier_scale = std::max(0.02, (1.0 - config_.cbf_gamma) * 0.10);
       map_soft_barrier = barrier_scale * stableSoftplus(-map_h / barrier_scale);
     }
-    cost.cbf += config_.weights.cbf *
+    cost.cbf += config_.weights.cbf * adaptive.safety_weight_scale *
       (square(map_cbf) + square(map_soft_barrier));
     if (map_h < 0.0) {
       cost.collision += config_.weights.collision;
@@ -943,9 +955,12 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
       initial_state.speed, vehicle_.max_speed, vehicle_.max_acceleration,
       horizon_duration));
   cost.terminal_lateral =
-    config_.weights.terminal_lateral * square(terminal_projection.lateral_error);
+    config_.weights.terminal_lateral * adaptive.raceline_weight_scale *
+    square(
+    terminal_projection.lateral_error - adaptive.lateral_reference_offset);
   cost.terminal_heading =
-    config_.weights.terminal_heading * square(terminal_projection.heading_error);
+    config_.weights.terminal_heading * adaptive.raceline_weight_scale *
+    square(terminal_projection.heading_error);
   cost.terminal_progress = config_.weights.terminal_progress *
     square(std::max(0.0, preview_target - cumulative_progress));
   return cost;
@@ -1166,6 +1181,20 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
     result.reason = "invalid_exploration_scale";
     return result;
   }
+  const std::array<double, 4> behavior_values{{
+    request.behavior.speed_scale,
+    request.behavior.raceline_weight_scale,
+    request.behavior.safety_weight_scale,
+    request.behavior.lateral_reference_offset}};
+  if (!std::all_of(behavior_values.begin(), behavior_values.end(), finite) ||
+    request.behavior.speed_scale < 0.0 ||
+    request.behavior.speed_scale > 1.0 ||
+    request.behavior.raceline_weight_scale <= 0.0 ||
+    request.behavior.safety_weight_scale < 1.0)
+  {
+    result.reason = "invalid_behavior";
+    return result;
+  }
 
   std::normal_distribution<double> unit_normal(0.0, 1.0);
   const std::size_t sample_count = config_.rollout_count;
@@ -1261,7 +1290,7 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
     }
     const CostBreakdown rollout_cost = evaluateTrajectory(
       request.initial_state, rollout_controls, *request.race_line,
-      request.distance_field, nullptr, request.obstacles);
+      request.distance_field, nullptr, request.obstacles, &request.behavior);
     if (finite(rollout_cost.total()) && rollout_cost.collision <= 0.0) {
       costs[sample] = rollout_cost.total() + importance_cost;
       rollout_valid[sample] = 1U;
@@ -1326,7 +1355,8 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
   result.control = nominal_controls_.front();
   result.cost = evaluateTrajectory(
     request.initial_state, nominal_controls_, *request.race_line,
-    request.distance_field, &result.predicted_states, request.obstacles);
+    request.distance_field, &result.predicted_states, request.obstacles,
+    &request.behavior);
   result.metrics = trajectoryMetrics(
     request.initial_state, result.predicted_states, *request.race_line,
     request.distance_field, request.obstacles);

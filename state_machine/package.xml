@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>race_manager</name>
+  <name>state_machine</name>
   <version>0.1.0</version>
   <description>Hierarchical race behavior state machine for RoboRacer.</description>
 

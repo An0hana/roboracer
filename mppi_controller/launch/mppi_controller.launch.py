@@ -29,6 +29,7 @@ def generate_launch_description():
     speed_weight = LaunchConfiguration("speed_weight")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
+    require_race_state = LaunchConfiguration("require_race_state")
 
     controller = LifecycleNode(
         package="mppi_controller",
@@ -47,6 +48,7 @@ def generate_launch_description():
                 "vehicle.max_speed": max_speed,
                 "weights.speed": ParameterValue(speed_weight, value_type=float),
                 "use_sim_time": use_sim_time,
+                "require_race_state": require_race_state,
             },
         ],
     )
@@ -111,6 +113,7 @@ def generate_launch_description():
         DeclareLaunchArgument("speed_weight", default_value="50.0"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("autostart", default_value="true"),
+        DeclareLaunchArgument("require_race_state", default_value="false"),
         controller,
         activate_when_inactive,
         configure,

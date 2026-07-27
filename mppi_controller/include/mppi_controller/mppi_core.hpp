@@ -263,6 +263,15 @@ struct TrajectoryMetrics
   std::size_t reverse_steps{0U};
 };
 
+struct MppiBehavior
+{
+  double speed_scale{1.0};
+  double raceline_weight_scale{1.0};
+  double safety_weight_scale{1.0};
+  // Signed in the race-line normal direction: positive is left.
+  double lateral_reference_offset{0.0};
+};
+
 struct MppiRequest
 {
   State initial_state{};
@@ -272,6 +281,7 @@ struct MppiRequest
   // measurement age via Obstacle::time_offset. Null or empty means none.
   const std::vector<Obstacle> * obstacles{nullptr};
   double exploration_scale{1.0};
+  MppiBehavior behavior{};
 };
 
 struct MppiResult
@@ -325,7 +335,8 @@ public:
     const State & initial_state, const std::vector<Control> & controls,
     const RaceLine & race_line, const DistanceField * distance_field,
     std::vector<State> * states = nullptr,
-    const std::vector<Obstacle> * obstacles = nullptr) const;
+    const std::vector<Obstacle> * obstacles = nullptr,
+    const MppiBehavior * behavior = nullptr) const;
 
   [[nodiscard]] bool repairControls(
     const State & initial_state, std::vector<Control> & controls,

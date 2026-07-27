@@ -701,5 +701,39 @@ TEST(CudaMppi, AvoidsObstaclesWithCpuValidatedSafety)
   EXPECT_GT(result.metrics.forward_progress, 0.3);
 }
 
+TEST(MppiBehavior, ScalesSpeedAndOffsetsRaceLineWithoutAnotherWeightSet)
+{
+  MppiConfig config = fastConfig();
+  VehicleConfig vehicle;
+  CpuMppiBackend backend(config, vehicle);
+  const RaceLine track = makeCircle(false, 2.0);
+  const State initial{
+    5.0, 0.0, kPi * 0.5, 1.2, std::atan(vehicle.wheelbase / 5.0)};
+  const std::vector<Control> controls(8U);
+
+  MppiBehavior neutral;
+  const CostBreakdown neutral_cost = backend.evaluateTrajectory(
+    initial, controls, track, nullptr, nullptr, nullptr, &neutral);
+
+  MppiBehavior slow = neutral;
+  slow.speed_scale = 0.5;
+  const CostBreakdown slow_cost = backend.evaluateTrajectory(
+    initial, controls, track, nullptr, nullptr, nullptr, &slow);
+  EXPECT_GT(slow_cost.speed, neutral_cost.speed);
+
+  MppiBehavior overtake = neutral;
+  overtake.lateral_reference_offset = 0.45;
+  const CostBreakdown overtake_cost = backend.evaluateTrajectory(
+    initial, controls, track, nullptr, nullptr, nullptr, &overtake);
+  EXPECT_GT(overtake_cost.lateral, neutral_cost.lateral);
+
+  MppiBehavior deformed = overtake;
+  deformed.raceline_weight_scale = 0.25;
+  const CostBreakdown deformed_cost = backend.evaluateTrajectory(
+    initial, controls, track, nullptr, nullptr, nullptr, &deformed);
+  EXPECT_NEAR(
+    deformed_cost.lateral, 0.25 * overtake_cost.lateral, 1.0e-9);
+}
+
 }  // namespace
 }  // namespace mppi_controller

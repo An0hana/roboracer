@@ -11,7 +11,7 @@
 | `/map` | `nav_msgs/msg/OccupancyGrid` | 建图模块 | 定位、全局赛线与可视化 | Reliable + TransientLocal |
 | `/perception/local_costmap` | `nav_msgs/msg/OccupancyGrid` | `local_costmap` | MPPI | 约40 Hz，Reliable KeepLast(1) |
 | `/perception/obstacles` | `roboracer_msgs/msg/TrackedObstacleArray` | 本地感知 | 规划、MPPI | 40–50 Hz，Reliable KeepLast(1) |
-| `/race_manager/state` | `roboracer_msgs/msg/RaceState` | 比赛状态机 | 规划、MPPI、Safety | 10–50 Hz，Reliable KeepLast(1) |
+| `/state_machine/state` | `roboracer_msgs/msg/RaceState` | 比赛状态机 | MPPI、Safety | 10–50 Hz，Reliable KeepLast(1) |
 | `/control/mppi_cmd` | `ackermann_msgs/msg/AckermannDriveStamped` | MPPI | Safety | 20 Hz，Reliable KeepLast(1) |
 | `/ackermann_cmd` | `ackermann_msgs/msg/AckermannDriveStamped` | Safety | 实车VESC接口 | 50 Hz，Reliable KeepLast(1) |
 
@@ -53,10 +53,12 @@ s,x,y,yaw,curvature,v_ref,width_left,width_right
 
 ## 职责
 
-`RaceState`除状态编号外，还提供`preferred_side`、`speed_scale`、
-`use_local_trajectory`和`fallback_ftg`，下游不得通过解析`reason`
-字符串作控制决策。`use_local_trajectory`仅为迁移期兼容字段，新MPPI链路必须保持为
-`false`。
+`RaceState`采用两层状态：安全层`INIT/READY/FAULT/STOP`，行为层
+`RACING/TRAILING/OVERTAKE`。MPPI直接消费`speed_scale`、
+`raceline_weight_scale`、`safety_weight_scale`和
+`lateral_reference_offset`；赛道变形通过连续`track_confidence`调节，
+不复制整套代价参数。`state`、`use_local_trajectory`和`fallback_ftg`
+仅为迁移兼容字段，新链路保持后两者为`false`，且不再产生`RETURN`状态。
 
 建图。负责：
 
@@ -69,7 +71,7 @@ s,x,y,yaw,curvature,v_ref,width_left,width_right
 
 - `/perception/local_costmap`
 - `/perception/obstacles`
-- `/race_manager/state`
+- `/state_machine/state`
 - `/control/mppi_cmd`
 - MPPI与Safety接口
 

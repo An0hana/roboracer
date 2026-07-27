@@ -22,6 +22,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "mppi_controller/mppi_core.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "roboracer_msgs/msg/race_state.hpp"
 #include "roboracer_msgs/msg/tracked_obstacle.hpp"
 #include "roboracer_msgs/msg/tracked_obstacle_array.hpp"
 #include "rclcpp/create_timer.hpp"
@@ -80,6 +81,13 @@ private:
     rclcpp::Time received{0, 0, RCL_ROS_TIME};
   };
 
+  struct TimedRaceState
+  {
+    roboracer_msgs::msg::RaceState state;
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+    rclcpp::Time received{0, 0, RCL_ROS_TIME};
+  };
+
   void declareParameters()
   {
     declare_parameter<std::string>("odom_topic", "/ego_racecar/odom");
@@ -110,6 +118,9 @@ private:
     declare_parameter<double>("obstacles_timeout", 0.20);
     declare_parameter<int>("max_obstacle_count", 8);
     declare_parameter<double>("min_obstacle_confidence", 0.25);
+    declare_parameter<std::string>("race_state_topic", "/state_machine/state");
+    declare_parameter<double>("race_state_timeout", 0.15);
+    declare_parameter<bool>("require_race_state", false);
 
     declare_parameter<int>("mppi.rollout_count", 2048);
     declare_parameter<int>("mppi.horizon_steps", 48);
@@ -294,10 +305,14 @@ private:
       obstacles_timeout_ = parameter<double>("obstacles_timeout");
       max_obstacle_count_ = parameter<int>("max_obstacle_count");
       min_obstacle_confidence_ = parameter<double>("min_obstacle_confidence");
+      race_state_topic_ = parameter<std::string>("race_state_topic");
+      race_state_timeout_ = parameter<double>("race_state_timeout");
+      require_race_state_ = parameter<bool>("require_race_state");
       if (obstacles_topic_.empty() || !positive(obstacles_timeout_) ||
         max_obstacle_count_ < 1 || max_obstacle_count_ > 64 ||
         !std::isfinite(min_obstacle_confidence_) || min_obstacle_confidence_ < 0.0 ||
-        min_obstacle_confidence_ > 1.0)
+        min_obstacle_confidence_ > 1.0 || race_state_topic_.empty() ||
+        !positive(race_state_timeout_))
       {
         error = "obstacle parameters are out of range";
         return false;
@@ -350,6 +365,9 @@ private:
     obstacles_subscription_ = create_subscription<roboracer_msgs::msg::TrackedObstacleArray>(
       obstacles_topic_, rclcpp::QoS(1).reliable(),
       std::bind(&MppiControllerNode::obstaclesCallback, this, std::placeholders::_1));
+    race_state_subscription_ = create_subscription<roboracer_msgs::msg::RaceState>(
+      race_state_topic_, rclcpp::QoS(1).reliable(),
+      std::bind(&MppiControllerNode::raceStateCallback, this, std::placeholders::_1));
 
     if (!backend_->warmup(*race_line_, nullptr)) {
       RCLCPP_ERROR(
@@ -393,6 +411,7 @@ private:
     odom_subscription_.reset();
     costmap_subscription_.reset();
     obstacles_subscription_.reset();
+    race_state_subscription_.reset();
     command_publisher_.reset();
     path_publisher_.reset();
     diagnostic_publisher_.reset();
@@ -406,6 +425,7 @@ private:
       latest_state_.reset();
       latest_distance_field_.reset();
       latest_obstacles_.reset();
+      latest_race_state_.reset();
       last_localization_jump_time_.reset();
     }
     {
@@ -574,6 +594,28 @@ private:
     latest_obstacles_ = std::move(timed);
   }
 
+  void raceStateCallback(const roboracer_msgs::msg::RaceState::SharedPtr message)
+  {
+    if (!message->header.frame_id.empty() && message->header.frame_id != map_frame_) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Rejected race state in frame '%s'; expected '%s'",
+        message->header.frame_id.c_str(), map_frame_.c_str());
+      return;
+    }
+    const rclcpp::Time received = now();
+    rclcpp::Time source_stamp(message->header.stamp, get_clock()->get_clock_type());
+    if (source_stamp.nanoseconds() == 0) {
+      source_stamp = received;
+    }
+    TimedRaceState timed;
+    timed.state = *message;
+    timed.stamp = source_stamp;
+    timed.received = received;
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    latest_race_state_ = std::move(timed);
+  }
+
   void controlTick()
   {
     const rclcpp::Time tick_time = now();
@@ -587,11 +629,13 @@ private:
     std::optional<rclcpp::Time> localization_jump_time;
     std::optional<TimedDistanceField> timed_distance_field;
     std::optional<TimedObstacles> timed_obstacles;
+    std::optional<TimedRaceState> timed_race_state;
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
       timed_state = latest_state_;
       timed_distance_field = latest_distance_field_;
       timed_obstacles = latest_obstacles_;
+      timed_race_state = latest_race_state_;
       localization_jump_time = last_localization_jump_time_;
     }
     if (!timed_state.has_value()) {
@@ -655,6 +699,57 @@ private:
     }
     request.race_line = &(*race_line_);
     request.distance_field = distance_field.get();
+
+    double race_state_age = std::numeric_limits<double>::quiet_NaN();
+    if (timed_race_state.has_value()) {
+      race_state_age = (tick_time - timed_race_state->stamp).seconds();
+      const double receive_age = (tick_time - timed_race_state->received).seconds();
+      if (!std::isfinite(race_state_age) || race_state_age < -0.02 ||
+        race_state_age > race_state_timeout_ || !std::isfinite(receive_age) ||
+        receive_age < -0.02 || receive_age > race_state_timeout_)
+      {
+        if (require_race_state_) {
+          safeResetBackend();
+          publishStop(
+            "race_state_stale", diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+            state_age, nullptr, costmap_age);
+          return;
+        }
+      } else {
+        const auto & behavior = timed_race_state->state;
+        if (require_race_state_ &&
+          (behavior.stop_requested ||
+          behavior.safety_state != roboracer_msgs::msg::RaceState::SAFETY_READY))
+        {
+          safeResetBackend();
+          publishStop(
+            "state_machine_stop:" + behavior.reason,
+            diagnostic_msgs::msg::DiagnosticStatus::WARN,
+            state_age, nullptr, costmap_age);
+          return;
+        }
+        request.behavior.speed_scale =
+          std::clamp(behavior.speed_scale, 0.0, 1.0);
+        request.behavior.raceline_weight_scale =
+          std::clamp(behavior.raceline_weight_scale, 0.05, 2.0);
+        request.behavior.safety_weight_scale =
+          std::clamp(behavior.safety_weight_scale, 1.0, 4.0);
+        request.behavior.lateral_reference_offset =
+          std::clamp(behavior.lateral_reference_offset, -1.0, 1.0);
+        active_track_confidence_ =
+          std::clamp(behavior.track_confidence, 0.0, 1.0);
+        active_safety_state_ = behavior.safety_state;
+        active_behavior_state_ = behavior.behavior_state;
+      }
+    } else if (require_race_state_) {
+      safeResetBackend();
+      publishStop(
+        "race_state_unavailable", diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+        state_age, nullptr, costmap_age);
+      return;
+    }
+    active_behavior_ = request.behavior;
+    active_race_state_age_ = race_state_age;
 
     std::vector<Obstacle> request_obstacles;
     double obstacle_age = std::numeric_limits<double>::quiet_NaN();
@@ -867,6 +962,22 @@ private:
     status.values.push_back(std::move(stale_value));
     status.values.push_back(diagnosticValue("exploration_scale", exploration_scale));
     status.values.push_back(diagnosticValue(
+      "race_state_age_s", active_race_state_age_));
+    status.values.push_back(diagnosticValue(
+      "track_confidence", active_track_confidence_));
+    status.values.push_back(diagnosticValue(
+      "safety_state", static_cast<double>(active_safety_state_)));
+    status.values.push_back(diagnosticValue(
+      "behavior_state", static_cast<double>(active_behavior_state_)));
+    status.values.push_back(diagnosticValue(
+      "behavior_speed_scale", active_behavior_.speed_scale));
+    status.values.push_back(diagnosticValue(
+      "raceline_weight_scale", active_behavior_.raceline_weight_scale));
+    status.values.push_back(diagnosticValue(
+      "safety_weight_scale", active_behavior_.safety_weight_scale));
+    status.values.push_back(diagnosticValue(
+      "lateral_reference_offset", active_behavior_.lateral_reference_offset));
+    status.values.push_back(diagnosticValue(
       "output_age_s", (now() - last_output_time_).seconds()));
     if (result != nullptr) {
       status.values.push_back(diagnosticValue("solve_time_ms", result->solve_time_ms));
@@ -965,14 +1076,25 @@ private:
   double obstacles_timeout_{0.20};
   int max_obstacle_count_{8};
   double min_obstacle_confidence_{0.25};
+  std::string race_state_topic_;
+  double race_state_timeout_{0.15};
+  bool require_race_state_{false};
   double near_obstacle_distance_{0.50};
   double near_obstacle_exploration_scale_{1.50};
+  MppiBehavior active_behavior_{};
+  double active_race_state_age_{std::numeric_limits<double>::quiet_NaN()};
+  double active_track_confidence_{1.0};
+  std::uint8_t active_safety_state_{
+    roboracer_msgs::msg::RaceState::SAFETY_READY};
+  std::uint8_t active_behavior_state_{
+    roboracer_msgs::msg::RaceState::BEHAVIOR_RACING};
 
   std::mutex data_mutex_;
   std::mutex costmap_callback_mutex_;
   std::optional<TimedState> latest_state_;
   std::optional<TimedDistanceField> latest_distance_field_;
   std::optional<TimedObstacles> latest_obstacles_;
+  std::optional<TimedRaceState> latest_race_state_;
   std::optional<rclcpp::Time> last_localization_jump_time_;
   std::optional<rclcpp::Time> last_costmap_processing_time_;
   double last_commanded_steering_{0.0};
@@ -986,6 +1108,8 @@ private:
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_subscription_;
   rclcpp::Subscription<roboracer_msgs::msg::TrackedObstacleArray>::SharedPtr
     obstacles_subscription_;
+  rclcpp::Subscription<roboracer_msgs::msg::RaceState>::SharedPtr
+    race_state_subscription_;
   rclcpp_lifecycle::LifecyclePublisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
     command_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
