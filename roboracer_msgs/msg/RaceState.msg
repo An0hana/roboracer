@@ -7,14 +7,34 @@ uint8 FAULT=5
 uint8 STOP=6
 uint8 RETURN=7
 
+uint8 SAFETY_INIT=0
+uint8 SAFETY_READY=1
+uint8 SAFETY_FAULT=2
+uint8 SAFETY_STOP=3
+
+uint8 BEHAVIOR_RACING=0
+uint8 BEHAVIOR_TRAILING=1
+uint8 BEHAVIOR_OVERTAKE=2
+
 int8 SIDE_RIGHT=-1
 int8 SIDE_NONE=0
 int8 SIDE_LEFT=1
 
 std_msgs/Header header
+
+# Hierarchical state consumed by the direct-control MPPI.
+uint8 safety_state
+uint8 behavior_state
+float64 track_confidence
+float64 raceline_weight_scale
+float64 safety_weight_scale
+float64 lateral_reference_offset
+bool stop_requested
+
+# Legacy flat state and planner fields retained for source compatibility.
+# The direct-control chain never emits RETURN or requests a local trajectory.
 uint8 state
 
-# Behavior command consumed by the planner/controller.
 int8 preferred_side
 float64 speed_scale
 bool use_local_trajectory

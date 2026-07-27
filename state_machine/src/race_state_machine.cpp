@@ -1,0 +1,359 @@
+// Copyright 2026 RoboRacer Team
+
+#include "state_machine/race_state_machine.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+#include <utility>
+
+namespace state_machine
+{
+namespace
+{
+
+bool finite(double value)
+{
+  return std::isfinite(value);
+}
+
+void validateConfig(const StateMachineConfig & config)
+{
+  if (!finite(config.follow_distance) || config.follow_distance <= 0.0 ||
+    !finite(config.opponent_corridor_half_width) ||
+    config.opponent_corridor_half_width <= 0.0 ||
+    !finite(config.pass_margin) || config.pass_margin < 0.0 ||
+    !finite(config.transition_confirmation) ||
+    config.transition_confirmation < 0.0 ||
+    !finite(config.minimum_state_duration) ||
+    config.minimum_state_duration < 0.0 ||
+    !finite(config.recovery_confirmation) ||
+    config.recovery_confirmation < 0.0 ||
+    !finite(config.opponent_lost_timeout) ||
+    config.opponent_lost_timeout < 0.0 ||
+    !finite(config.return_blend_duration) ||
+    config.return_blend_duration <= 0.0 ||
+    !finite(config.overtake_lateral_offset) ||
+    config.overtake_lateral_offset <= 0.0 ||
+    !finite(config.cruise_speed_scale) ||
+    config.cruise_speed_scale <= 0.0 ||
+    config.cruise_speed_scale > 1.0 ||
+    !finite(config.trailing_speed_scale) ||
+    config.trailing_speed_scale <= 0.0 ||
+    config.trailing_speed_scale > 1.0 ||
+    !finite(config.overtake_speed_scale) ||
+    config.overtake_speed_scale <= 0.0 ||
+    config.overtake_speed_scale > 1.0 ||
+    !finite(config.degraded_speed_scale) ||
+    config.degraded_speed_scale <= 0.0 ||
+    config.degraded_speed_scale > config.cruise_speed_scale ||
+    !finite(config.minimum_raceline_weight_scale) ||
+    config.minimum_raceline_weight_scale <= 0.0 ||
+    config.minimum_raceline_weight_scale > 1.0 ||
+    !finite(config.maximum_safety_weight_scale) ||
+    config.maximum_safety_weight_scale < 1.0)
+  {
+    throw std::invalid_argument("invalid race state machine configuration");
+  }
+}
+
+}  // namespace
+
+TrackConfidenceFilter::TrackConfidenceFilter(
+  double rise_time, double fall_time, double initial)
+: rise_time_(rise_time), fall_time_(fall_time), value_(initial)
+{
+  if (!finite(rise_time_) || rise_time_ <= 0.0 ||
+    !finite(fall_time_) || fall_time_ <= 0.0 ||
+    !finite(value_) || value_ < 0.0 || value_ > 1.0)
+  {
+    throw std::invalid_argument("invalid track confidence filter configuration");
+  }
+}
+
+double TrackConfidenceFilter::update(double raw_confidence, double dt)
+{
+  if (!finite(raw_confidence) || !finite(dt) || dt < 0.0) {
+    throw std::invalid_argument("invalid track confidence filter input");
+  }
+  raw_confidence = std::clamp(raw_confidence, 0.0, 1.0);
+  const double time_constant =
+    raw_confidence >= value_ ? rise_time_ : fall_time_;
+  const double alpha = dt <= 0.0 ? 0.0 : 1.0 - std::exp(-dt / time_constant);
+  value_ = std::clamp(value_ + alpha * (raw_confidence - value_), 0.0, 1.0);
+  return value_;
+}
+
+double TrackConfidenceFilter::value() const noexcept
+{
+  return value_;
+}
+
+RaceStateMachine::RaceStateMachine(StateMachineConfig config)
+: config_(std::move(config))
+{
+  validateConfig(config_);
+}
+
+StateCommand RaceStateMachine::update(const StateObservation & observation)
+{
+  if (!finite(observation.time) ||
+    !finite(observation.opponent_longitudinal) ||
+    !finite(observation.opponent_lateral) ||
+    !finite(observation.left_clearance_score) ||
+    !finite(observation.right_clearance_score) ||
+    !finite(observation.track_confidence))
+  {
+    throw std::invalid_argument("state observation must be finite");
+  }
+  if (initialized_ && observation.time < last_time_) {
+    throw std::invalid_argument("state observation time must be monotonic");
+  }
+  if (!initialized_) {
+    initialized_ = true;
+    state_enter_time_ = observation.time;
+    last_opponent_seen_time_ = observation.time;
+  }
+  last_time_ = observation.time;
+  latest_track_confidence_ =
+    std::clamp(observation.track_confidence, 0.0, 1.0);
+  if (observation.opponent_detected) {
+    last_opponent_seen_time_ = observation.time;
+  }
+
+  if (safety_state_ == SafetyState::READY && !observation.inputs_ready) {
+    transitionSafety(SafetyState::FAULT, "stale_or_missing_input", observation.time);
+    return command(observation.time);
+  }
+  if (safety_state_ == SafetyState::READY && observation.emergency_stop) {
+    transitionSafety(SafetyState::STOP, "emergency_clearance", observation.time);
+    return command(observation.time);
+  }
+
+  switch (safety_state_) {
+    case SafetyState::INIT:
+      if (!observation.inputs_ready) {
+        reason_ = "waiting_for_inputs";
+        clearPendingTransition();
+      } else if (transitionConfirmed(
+          100 + static_cast<int>(SafetyState::READY), "inputs_ready",
+          observation.time, config_.recovery_confirmation))
+      {
+        transitionSafety(SafetyState::READY, "inputs_ready", observation.time);
+      }
+      break;
+    case SafetyState::FAULT:
+    case SafetyState::STOP:
+      if (observation.inputs_ready && !observation.emergency_stop) {
+        if (transitionConfirmed(
+            100 + static_cast<int>(SafetyState::READY), "fault_recovered",
+            observation.time, config_.recovery_confirmation))
+        {
+          transitionSafety(SafetyState::READY, "fault_recovered", observation.time);
+        }
+      } else {
+        clearPendingTransition();
+      }
+      break;
+    case SafetyState::READY:
+      break;
+  }
+
+  if (safety_state_ != SafetyState::READY) {
+    return command(observation.time);
+  }
+
+  const bool behavior_can_change =
+    observation.time - state_enter_time_ >= config_.minimum_state_duration;
+  switch (behavior_state_) {
+    case BehaviorState::RACING:
+      if (opponentAhead(observation) && behavior_can_change) {
+        if (transitionConfirmed(
+            static_cast<int>(BehaviorState::TRAILING), "opponent_ahead",
+            observation.time, config_.transition_confirmation))
+        {
+          transitionBehavior(
+            BehaviorState::TRAILING, PreferredSide::NONE,
+            "opponent_ahead", observation.time);
+        }
+      } else {
+        clearPendingTransition();
+      }
+      break;
+    case BehaviorState::TRAILING:
+      if (!opponentAhead(observation) && behavior_can_change) {
+        if (transitionConfirmed(
+            static_cast<int>(BehaviorState::RACING), "path_clear",
+            observation.time, config_.transition_confirmation))
+        {
+          transitionBehavior(
+            BehaviorState::RACING, PreferredSide::NONE,
+            "path_clear", observation.time);
+        }
+      } else if (behavior_can_change &&
+        (observation.left_available || observation.right_available))
+      {
+        PreferredSide side = PreferredSide::NONE;
+        if (observation.left_available && observation.right_available) {
+          side = observation.left_clearance_score >= observation.right_clearance_score ?
+            PreferredSide::LEFT : PreferredSide::RIGHT;
+        } else {
+          side = observation.left_available ? PreferredSide::LEFT : PreferredSide::RIGHT;
+        }
+        const std::string reason =
+          side == PreferredSide::LEFT ? "left_corridor_clear" : "right_corridor_clear";
+        if (transitionConfirmed(
+            static_cast<int>(BehaviorState::OVERTAKE), reason,
+            observation.time, config_.transition_confirmation))
+        {
+          transitionBehavior(BehaviorState::OVERTAKE, side, reason, observation.time);
+        }
+      } else {
+        clearPendingTransition();
+      }
+      break;
+    case BehaviorState::OVERTAKE:
+      if (behavior_can_change) {
+        const bool passed =
+          observation.opponent_detected &&
+          observation.opponent_longitudinal < -config_.pass_margin;
+        const bool opponent_lost =
+          !observation.opponent_detected &&
+          observation.time - last_opponent_seen_time_ >=
+          config_.opponent_lost_timeout;
+        if (passed || opponent_lost) {
+          const std::string reason =
+            passed ? "opponent_behind" : "opponent_lost_after_overtake";
+          if (transitionConfirmed(
+              static_cast<int>(BehaviorState::RACING), reason,
+              observation.time, config_.transition_confirmation))
+          {
+            transitionBehavior(
+              BehaviorState::RACING, PreferredSide::NONE, reason, observation.time);
+          }
+        } else {
+          clearPendingTransition();
+        }
+      }
+      break;
+  }
+  return command(observation.time);
+}
+
+SafetyState RaceStateMachine::safetyState() const noexcept
+{
+  return safety_state_;
+}
+
+BehaviorState RaceStateMachine::behaviorState() const noexcept
+{
+  return behavior_state_;
+}
+
+bool RaceStateMachine::opponentAhead(const StateObservation & observation) const
+{
+  return observation.opponent_detected &&
+         observation.opponent_longitudinal > 0.0 &&
+         observation.opponent_longitudinal <= config_.follow_distance &&
+         std::abs(observation.opponent_lateral) <=
+         config_.opponent_corridor_half_width;
+}
+
+bool RaceStateMachine::transitionConfirmed(
+  int target, const std::string & reason, double now, double confirmation)
+{
+  if (!pending_state_.has_value() || *pending_state_ != target ||
+    pending_reason_ != reason)
+  {
+    pending_state_ = target;
+    pending_reason_ = reason;
+    pending_since_ = now;
+  }
+  return now - pending_since_ >= confirmation;
+}
+
+void RaceStateMachine::transitionSafety(
+  SafetyState target, const std::string & reason, double now)
+{
+  safety_state_ = target;
+  behavior_state_ = BehaviorState::RACING;
+  preferred_side_ = PreferredSide::NONE;
+  reason_ = reason;
+  state_enter_time_ = now;
+  return_blend_initial_offset_ = 0.0;
+  clearPendingTransition();
+}
+
+void RaceStateMachine::transitionBehavior(
+  BehaviorState target, PreferredSide side, const std::string & reason,
+  double now)
+{
+  if (behavior_state_ == BehaviorState::OVERTAKE &&
+    target == BehaviorState::RACING)
+  {
+    return_blend_initial_offset_ =
+      preferred_side_ == PreferredSide::LEFT ?
+      config_.overtake_lateral_offset : -config_.overtake_lateral_offset;
+    return_blend_start_time_ = now;
+  }
+  behavior_state_ = target;
+  preferred_side_ = side;
+  reason_ = reason;
+  state_enter_time_ = now;
+  clearPendingTransition();
+}
+
+void RaceStateMachine::clearPendingTransition()
+{
+  pending_state_.reset();
+  pending_reason_.clear();
+}
+
+StateCommand RaceStateMachine::command(double now) const
+{
+  StateCommand output;
+  output.safety_state = safety_state_;
+  output.behavior_state = behavior_state_;
+  output.preferred_side = preferred_side_;
+  output.reason = reason_;
+  output.track_confidence = latest_track_confidence_;
+  output.raceline_weight_scale =
+    config_.minimum_raceline_weight_scale +
+    (1.0 - config_.minimum_raceline_weight_scale) * latest_track_confidence_;
+  output.safety_weight_scale =
+    config_.maximum_safety_weight_scale -
+    (config_.maximum_safety_weight_scale - 1.0) * latest_track_confidence_;
+  const double environment_speed =
+    config_.degraded_speed_scale +
+    (config_.cruise_speed_scale - config_.degraded_speed_scale) *
+    latest_track_confidence_;
+  output.stop_requested = safety_state_ != SafetyState::READY;
+  if (output.stop_requested) {
+    return output;
+  }
+
+  switch (behavior_state_) {
+    case BehaviorState::RACING:
+      output.speed_scale = environment_speed;
+      if (return_blend_initial_offset_ != 0.0) {
+        const double fraction = std::clamp(
+          (now - return_blend_start_time_) / config_.return_blend_duration,
+          0.0, 1.0);
+        output.lateral_reference_offset =
+          return_blend_initial_offset_ * (1.0 - fraction);
+      }
+      break;
+    case BehaviorState::TRAILING:
+      output.speed_scale = std::min(environment_speed, config_.trailing_speed_scale);
+      break;
+    case BehaviorState::OVERTAKE:
+      output.speed_scale = std::min(environment_speed, config_.overtake_speed_scale);
+      output.lateral_reference_offset =
+        preferred_side_ == PreferredSide::LEFT ?
+        config_.overtake_lateral_offset : -config_.overtake_lateral_offset;
+      break;
+  }
+  return output;
+}
+
+}  // namespace state_machine

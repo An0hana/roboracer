@@ -33,6 +33,11 @@ mppi_controller:
     obstacles_timeout: 0.20
     max_obstacle_count: 8
     min_obstacle_confidence: 0.25
+    race_state_topic: /state_machine/state
+    race_state_timeout: 0.15
+    # Standalone MPPI validation remains possible. The adaptive stack launch
+    # overrides this to true and then the safety layer is authoritative.
+    require_race_state: false
 
     mppi:
       rollout_count: 2048

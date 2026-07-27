@@ -358,6 +358,10 @@ struct F1TenthCostParams : public CostParams<2>
   float minimum_preview_distance{4.0F};
   float barrier_distance{0.05F};
   float barrier_scale{0.05F};
+  float speed_scale{1.0F};
+  float raceline_weight_scale{1.0F};
+  float safety_weight_scale{1.0F};
+  float lateral_reference_offset{0.0F};
 
   float weight_lateral{12.0F};
   float weight_heading{8.0F};
@@ -586,7 +590,9 @@ private:
     const float cosine = cosf(reference_yaw);
     const float sine = sinf(reference_yaw);
     const float lag_error = cosine * dx + sine * dy;
-    const float lateral_error = -sine * dx + cosine * dy;
+    const float physical_lateral_error = -sine * dx + cosine * dy;
+    const float lateral_error =
+      physical_lateral_error - this->params_.lateral_reference_offset;
     const float heading_error = normalizeAngleFloat(
       state[S_IND_CLASS(F1TenthDynamicsParams, YAW)] - reference_yaw);
     const float speed = state[S_IND_CLASS(F1TenthDynamicsParams, SPEED)];
@@ -602,7 +608,7 @@ private:
       -this->params_.half_width, this->params_.half_width};
     for (int longitudinal_index = 0; longitudinal_index < 2; ++longitudinal_index) {
       for (int lateral_index = 0; lateral_index < 2; ++lateral_index) {
-        const float corner_lateral = lateral_error +
+        const float corner_lateral = physical_lateral_error +
           longitudinal_extents[longitudinal_index] * heading_sine +
           lateral_extents[lateral_index] * heading_cosine;
         minimum_lateral = fminf(minimum_lateral, corner_lateral);
@@ -641,20 +647,26 @@ private:
       forward_velocity < -1.0e-3F;
 
     float cost = 0.0F;
-    cost += this->params_.weight_lateral * squareFloat(lateral_error);
-    cost += this->params_.weight_heading * squareFloat(heading_error);
-    cost += this->params_.weight_lag * squareFloat(lag_error);
+    cost += this->params_.weight_lateral *
+      this->params_.raceline_weight_scale * squareFloat(lateral_error);
+    cost += this->params_.weight_heading *
+      this->params_.raceline_weight_scale * squareFloat(heading_error);
+    cost += this->params_.weight_lag *
+      this->params_.raceline_weight_scale * squareFloat(lag_error);
     cost += this->params_.weight_speed * squareFloat(
-      speed - this->params_.waypoint_speed[index]);
+      speed - this->params_.waypoint_speed[index] * this->params_.speed_scale);
     cost -= this->params_.weight_progress * forward_velocity * this->params_.dt;
     cost += this->params_.weight_lateral_acceleration *
       (squareFloat(lateral_acceleration) +
       20.0F * squareFloat(lateral_acceleration_excess));
-    cost += this->params_.weight_boundary *
+    // Static race-line widths lose authority with the rest of the prior
+    // geometry; only the live scan barrier receives safety_weight_scale.
+    cost += this->params_.weight_boundary * this->params_.raceline_weight_scale *
       (squareFloat(boundary_violation) + squareFloat(map_violation));
     // Race-line widths remain a soft global preference. Only the live
     // scan-derived local distance field can declare a collision.
-    cost += this->params_.weight_barrier * squareFloat(map_soft_barrier);
+    cost += this->params_.weight_barrier *
+      this->params_.safety_weight_scale * squareFloat(map_soft_barrier);
     if (safe_map_margin < 0.0F) {
       cost += this->params_.weight_collision;
       if (crash_status != nullptr) {
@@ -681,7 +693,8 @@ private:
     const float cosine = cosf(reference_yaw);
     const float sine = sinf(reference_yaw);
     const float longitudinal_error = cosine * dx + sine * dy;
-    const float lateral_error = -sine * dx + cosine * dy;
+    const float lateral_error = -sine * dx + cosine * dy -
+      this->params_.lateral_reference_offset;
     const float heading_error = normalizeAngleFloat(
       state[S_IND_CLASS(F1TenthDynamicsParams, YAW)] - reference_yaw);
     const float forward_progress =
@@ -689,8 +702,10 @@ private:
     const float preview_shortfall = fmaxf(
       0.0F, this->params_.minimum_preview_distance - forward_progress);
     return 0.5F * stateCost(state, kCudaTimesteps - 1, nullptr) +
-           this->params_.weight_terminal_lateral * squareFloat(lateral_error) +
-           this->params_.weight_terminal_heading * squareFloat(heading_error) +
+           this->params_.weight_terminal_lateral *
+           this->params_.raceline_weight_scale * squareFloat(lateral_error) +
+           this->params_.weight_terminal_heading *
+           this->params_.raceline_weight_scale * squareFloat(heading_error) +
            this->params_.weight_terminal_progress * squareFloat(preview_shortfall);
   }
 
@@ -944,6 +959,21 @@ public:
     if (!std::isfinite(request.exploration_scale) || request.exploration_scale < 1.0) {
       return finish("invalid_exploration_scale");
     }
+    const std::array<double, 4> behavior_values{{
+      request.behavior.speed_scale,
+      request.behavior.raceline_weight_scale,
+      request.behavior.safety_weight_scale,
+      request.behavior.lateral_reference_offset}};
+    if (!std::all_of(
+        behavior_values.begin(), behavior_values.end(),
+        [](double value) {return std::isfinite(value);}) ||
+      request.behavior.speed_scale < 0.0 ||
+      request.behavior.speed_scale > 1.0 ||
+      request.behavior.raceline_weight_scale <= 0.0 ||
+      request.behavior.safety_weight_scale < 1.0)
+    {
+      return finish("invalid_behavior");
+    }
     constexpr double bounds_epsilon = 1.0e-9;
     if (request.initial_state.speed < vehicle_.min_speed - bounds_epsilon ||
       request.initial_state.speed > vehicle_.max_speed + bounds_epsilon ||
@@ -956,7 +986,9 @@ public:
     }
 
     try {
-      prepareCost(request.initial_state, *request.race_line, request.obstacles);
+      prepareCost(
+        request.initial_state, *request.race_line, request.obstacles,
+        request.behavior);
       if (launch_seed_pending_ && request.initial_state.speed <= 0.05) {
         ControllerT::control_trajectory launch_controls =
           ControllerT::control_trajectory::Zero();
@@ -1019,7 +1051,8 @@ public:
       result.control = controls.front();
       result.cost = validator_.evaluateTrajectory(
         request.initial_state, controls, *request.race_line,
-        request.distance_field, &result.predicted_states, request.obstacles);
+        request.distance_field, &result.predicted_states, request.obstacles,
+        &request.behavior);
       bool finite_cost = std::isfinite(result.cost.total());
       bool complete_trajectory_safe = result.cost.collision <= 0.0;
       if ((!finite_cost || !complete_trajectory_safe) &&
@@ -1031,7 +1064,8 @@ public:
         result.predicted_states.clear();
         result.cost = validator_.evaluateTrajectory(
           request.initial_state, controls, *request.race_line,
-          request.distance_field, &result.predicted_states, request.obstacles);
+          request.distance_field, &result.predicted_states, request.obstacles,
+          &request.behavior);
         finite_cost = std::isfinite(result.cost.total());
         complete_trajectory_safe = result.cost.collision <= 0.0;
       }
@@ -1114,7 +1148,7 @@ private:
       }
       const CostBreakdown cost = validator_.evaluateTrajectory(
         request.initial_state, candidate, *request.race_line,
-        request.distance_field, nullptr, request.obstacles);
+        request.distance_field, nullptr, request.obstacles, &request.behavior);
       if (cost.collision <= 0.0 && std::isfinite(cost.total()) &&
         cost.total() < best_cost)
       {
@@ -1205,7 +1239,8 @@ private:
 
   void prepareCost(
     const State & state, const RaceLine & race_line,
-    const std::vector<Obstacle> * obstacles = nullptr)
+    const std::vector<Obstacle> * obstacles = nullptr,
+    const MppiBehavior & behavior = MppiBehavior{})
   {
     cost_params_.obstacle_count = 0;
     cost_params_.obstacle_time_offset = 0.0F;
@@ -1296,6 +1331,13 @@ private:
     cost_params_.barrier_distance = static_cast<float>(config_.repair_clearance);
     cost_params_.barrier_scale = static_cast<float>(std::max(
       0.02, (1.0 - config_.cbf_gamma) * 0.10));
+    cost_params_.speed_scale = static_cast<float>(behavior.speed_scale);
+    cost_params_.raceline_weight_scale =
+      static_cast<float>(behavior.raceline_weight_scale);
+    cost_params_.safety_weight_scale =
+      static_cast<float>(behavior.safety_weight_scale);
+    cost_params_.lateral_reference_offset =
+      static_cast<float>(behavior.lateral_reference_offset);
     cost_params_.weight_lateral = static_cast<float>(config_.weights.lateral);
     cost_params_.weight_heading = static_cast<float>(config_.weights.heading);
     cost_params_.weight_lag = static_cast<float>(config_.weights.lag);

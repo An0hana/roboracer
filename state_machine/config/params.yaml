@@ -1,0 +1,43 @@
+state_machine:
+  ros__parameters:
+    obstacles_topic: /perception/obstacles
+    odom_topic: /ego_racecar/odom
+    costmap_topic: /perception/local_costmap
+    output_topic: /state_machine/state
+    marker_topic: /state_machine/state_marker
+    race_line_file: ""
+    publish_rate_hz: 20.0
+    target_frame: map
+    state_timeout: 0.10
+    obstacle_timeout: 0.20
+    costmap_timeout: 0.12
+    minimum_obstacle_confidence: 0.25
+    occupied_threshold: 50
+
+    # Continuous confidence in the pre-built track geometry.  Fast decay
+    # reacts to a moved wall; slow recovery prevents mode chattering.
+    boundary_match_tolerance: 0.30
+    confidence_preview_distance: 6.0
+    minimum_confidence_samples: 8
+    confidence_rise_time: 1.50
+    confidence_fall_time: 0.35
+
+    follow_distance: 4.0
+    opponent_corridor_half_width: 0.80
+    pass_margin: 0.30
+    corridor_clearance_radius: 0.24
+    emergency_stop_distance: 0.55
+    overtake_lateral_offset: 0.45
+
+    transition_confirmation: 0.20
+    minimum_state_duration: 0.40
+    recovery_confirmation: 0.50
+    opponent_lost_timeout: 0.50
+    return_blend_duration: 1.50
+
+    cruise_speed_scale: 1.0
+    trailing_speed_scale: 0.60
+    overtake_speed_scale: 1.0
+    degraded_speed_scale: 0.55
+    minimum_raceline_weight_scale: 0.25
+    maximum_safety_weight_scale: 2.0
