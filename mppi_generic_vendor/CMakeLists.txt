@@ -19,9 +19,28 @@ option(
   MPPI_GENERIC_VENDOR_ENABLE_CUDA
   "Fetch and build the pinned MPPI-Generic CUDA dependency"
   ${_cuda_default})
+set(_mppi_generic_cuda_arch_default "87")
+if(DEFINED ENV{ROBORACER_CUDA_ARCH} AND NOT "$ENV{ROBORACER_CUDA_ARCH}" STREQUAL "")
+  set(_mppi_generic_cuda_arch_default "$ENV{ROBORACER_CUDA_ARCH}")
+else()
+  find_program(_mppi_generic_nvidia_smi nvidia-smi)
+  if(_mppi_generic_nvidia_smi)
+    execute_process(
+      COMMAND "${_mppi_generic_nvidia_smi}" --query-gpu=compute_cap --format=csv,noheader,nounits
+      OUTPUT_VARIABLE _mppi_generic_compute_caps
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_mppi_generic_compute_caps)
+      string(REGEX MATCH "[0-9]+\\.[0-9]+" _mppi_generic_first_compute_cap "${_mppi_generic_compute_caps}")
+      if(_mppi_generic_first_compute_cap)
+        string(REPLACE "." "" _mppi_generic_cuda_arch_default "${_mppi_generic_first_compute_cap}")
+      endif()
+    endif()
+  endif()
+endif()
 set(
-  MPPI_GENERIC_CUDA_ARCH "87" CACHE STRING
-  "CUDA architecture passed to MPPI-Generic (87 is Jetson Orin)")
+  MPPI_GENERIC_CUDA_ARCH "${_mppi_generic_cuda_arch_default}" CACHE STRING
+  "CUDA architecture passed to MPPI-Generic (87 is Jetson Orin, 89 is RTX 40 Ada)")
 set(
   MPPI_GENERIC_SOURCE_DIR "" CACHE PATH
   "Optional existing MPPI-Generic v0.9.0 source tree for offline builds")

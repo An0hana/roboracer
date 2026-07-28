@@ -16,6 +16,7 @@ def generate_launch_description():
     race_line_file = LaunchConfiguration("race_line_file")
     backend = LaunchConfiguration("backend")
     params_file = LaunchConfiguration("params_file")
+    costmap_params_file = LaunchConfiguration("costmap_params_file")
 
     local_costmap = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -26,6 +27,7 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
+            "params_file": costmap_params_file,
             "scan_topic": scan_topic,
             "odom_topic": odom_topic,
             "costmap_topic": "/perception/local_costmap",
@@ -65,6 +67,15 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("command_topic", default_value="/drive"),
         DeclareLaunchArgument("max_speed", default_value="0.5"),
+        DeclareLaunchArgument(
+            "costmap_params_file",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("local_costmap"),
+                "config",
+                "params.yaml",
+            ]),
+            description="Local costmap parameter YAML",
+        ),
         DeclareLaunchArgument(
             "params_file",
             default_value=PathJoinSubstitution([

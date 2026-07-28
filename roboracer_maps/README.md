@@ -16,10 +16,21 @@ maps/<track_name>/
 `maps/racetrack`保持不变。副本中的坐标、里程和赛道宽度放大1.5倍，
 曲率缩小为原来的三分之二。
 
+转换脚本同时支持旧版9列优化器输出和新版7列
+`x;y;speed;trajectory_direction;s;width_left;width_right`输出。
+
 转换命令：
 
 ```bash
 ros2 run roboracer_maps convert_optimizer_raceline.py \
   traj_race_cl.csv raceline.csv \
   --max-speed 4.0 --max-lateral-acceleration 4.0
+```
+
+新赛道高速参考线使用：
+
+```bash
+ros2 run roboracer_maps convert_optimizer_raceline.py \
+  traj_race_cl_v1.csv raceline.csv \
+  --max-speed 8.0 --max-lateral-acceleration 6.0
 ```

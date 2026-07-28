@@ -121,6 +121,54 @@ TEST(RaceStateMachine, OvertakesAndBlendsDirectlyBackToRacing)
   EXPECT_NEAR(result.lateral_reference_offset, 0.0, 1.0e-9);
 }
 
+TEST(RaceStateMachine, EntersOvertakeDirectlyWhenAheadCorridorIsClear)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+
+  observation.opponent_detected = true;
+  observation.opponent_longitudinal = 5.0;
+  observation.opponent_lateral = 0.10;
+  observation.ego_speed = 2.0;
+  observation.opponent_longitudinal_speed = 1.0;
+  observation.left_available = true;
+  observation.left_clearance_score = 1.0;
+
+  const auto result = runFor(machine, observation, 0.70);
+  EXPECT_EQ(result.behavior_state, BehaviorState::OVERTAKE);
+  EXPECT_EQ(result.preferred_side, PreferredSide::LEFT);
+  EXPECT_EQ(result.reason, "clear_corridor_ahead");
+}
+
+TEST(RaceStateMachine, UsesClosingSpeedToTriggerBehaviorEarlier)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+
+  observation.opponent_detected = true;
+  observation.opponent_longitudinal = 5.0;
+  observation.opponent_lateral = 0.10;
+  observation.ego_speed = 2.0;
+  observation.opponent_longitudinal_speed = 1.0;
+
+  auto result = runFor(machine, observation, 0.70);
+  EXPECT_EQ(result.behavior_state, BehaviorState::TRAILING);
+
+  RaceStateMachine receding_machine(config());
+  StateObservation receding_observation;
+  enterReady(receding_machine, receding_observation);
+  receding_observation.opponent_detected = true;
+  receding_observation.opponent_longitudinal = 5.0;
+  receding_observation.opponent_lateral = 0.10;
+  receding_observation.ego_speed = 1.0;
+  receding_observation.opponent_longitudinal_speed = 2.0;
+
+  result = runFor(receding_machine, receding_observation, 0.70);
+  EXPECT_EQ(result.behavior_state, BehaviorState::RACING);
+}
+
 TEST(RaceStateMachine, ChoosesCorridorWithHigherClearance)
 {
   RaceStateMachine machine(config());
@@ -162,6 +210,9 @@ TEST(RaceStateMachine, RejectsInvalidInputAndConfiguration)
 {
   auto invalid = config();
   invalid.return_blend_duration = 0.0;
+  EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
+  invalid = config();
+  invalid.maximum_follow_distance = invalid.follow_distance - 0.1;
   EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
 
   RaceStateMachine machine(config());

@@ -28,22 +28,46 @@ def load_optimizer_output(path: Path) -> list[dict[str, float]]:
             if not stripped or stripped.startswith("#"):
                 continue
             fields = stripped.split(";")
-            if len(fields) != 9:
-                raise ValueError(f"{path}:{line_number}: expected 9 fields")
             values = [float(field) for field in fields]
             if not all(math.isfinite(value) for value in values):
                 raise ValueError(f"{path}:{line_number}: non-finite value")
-            rows.append(
-                {
-                    "s": values[0],
-                    "x": values[1],
-                    "y": values[2],
-                    "source_curvature": values[4],
-                    "source_speed": values[5],
-                    "width_left": values[7],
-                    "width_right": values[8],
-                }
-            )
+            if len(values) == 9:
+                # Legacy optimizer output:
+                # s;x;y;psi;curvature;speed;acceleration;width_left;width_right
+                rows.append(
+                    {
+                        "s": values[0],
+                        "x": values[1],
+                        "y": values[2],
+                        # Legacy psi uses the optimizer's normal-angle
+                        # convention; derive the tangent yaw geometrically.
+                        "source_yaw": math.nan,
+                        "source_curvature": values[4],
+                        "source_speed": values[5],
+                        "width_left": values[7],
+                        "width_right": values[8],
+                    }
+                )
+            elif len(values) == 7:
+                # trajectory_planning_helpers output:
+                # x;y;speed;trajectory_direction;s;width_left;width_right
+                rows.append(
+                    {
+                        "s": values[4],
+                        "x": values[0],
+                        "y": values[1],
+                        "source_yaw": values[3],
+                        "source_curvature": math.nan,
+                        "source_speed": values[2],
+                        "width_left": values[5],
+                        "width_right": values[6],
+                    }
+                )
+            else:
+                raise ValueError(
+                    f"{path}:{line_number}: expected 7 or 9 fields, "
+                    f"got {len(values)}"
+                )
     if len(rows) < 3:
         raise ValueError("race line needs at least three samples")
     return rows
@@ -86,12 +110,24 @@ def convert(
     for index, row in enumerate(rows):
         previous = rows[(index - 1) % len(rows)]
         following = rows[(index + 1) % len(rows)]
-        yaw, curvature = geometry(previous, row, following)
-        curvature_difference = abs(curvature - row["source_curvature"])
-        if curvature_difference > 0.05:
+        geometry_yaw, curvature = geometry(previous, row, following)
+        source_yaw = row["source_yaw"]
+        yaw = geometry_yaw
+        if math.isfinite(source_yaw):
+            source_yaw = normalize_angle(source_yaw)
+            yaw_difference = abs(normalize_angle(source_yaw - geometry_yaw))
+            if yaw_difference > 0.15:
+                raise ValueError(
+                    f"heading convention mismatch at sample {index}: "
+                    f"{source_yaw} versus {geometry_yaw}"
+                )
+            yaw = source_yaw
+        source_curvature = row["source_curvature"]
+        curvature_difference = abs(curvature - source_curvature)
+        if math.isfinite(source_curvature) and curvature_difference > 0.05:
             raise ValueError(
                 f"curvature convention mismatch at sample {index}: "
-                f"{curvature} versus {row['source_curvature']}"
+                f"{curvature} versus {source_curvature}"
             )
         curvature_speed = (
             math.sqrt(max_lateral_acceleration / abs(curvature))

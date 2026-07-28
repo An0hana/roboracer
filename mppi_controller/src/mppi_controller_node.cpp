@@ -42,6 +42,12 @@ public:
   explicit MppiControllerNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
   : rclcpp_lifecycle::LifecycleNode("mppi_controller", options)
   {
+    control_callback_group_ = create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
+    sensor_callback_group_ = create_callback_group(
+      rclcpp::CallbackGroupType::Reentrant);
+    costmap_callback_group_ = create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
     declareParameters();
     parameter_callback_handle_ = add_on_set_parameters_callback(
       [this](const std::vector<rclcpp::Parameter> &) {
@@ -94,6 +100,7 @@ private:
     declare_parameter<std::string>("costmap_topic", "/perception/local_costmap");
     declare_parameter<std::string>("command_topic", "/control/mppi_cmd");
     declare_parameter<std::string>("path_topic", "/control/mppi_path");
+    declare_parameter<std::string>("raceline_path_topic", "/debug/raceline");
     declare_parameter<std::string>("diagnostics_topic", "/diagnostics");
     declare_parameter<std::string>("map_frame", "map");
     declare_parameter<std::string>("base_frame", "base_link");
@@ -131,6 +138,11 @@ private:
     declare_parameter<double>("mppi.pure_noise_fraction", 0.05);
     declare_parameter<double>("mppi.near_obstacle_distance", 0.50);
     declare_parameter<double>("mppi.near_obstacle_exploration_scale", 1.50);
+    declare_parameter<double>("recovery.stuck_speed_threshold", 0.05);
+    declare_parameter<double>("recovery.stuck_speed_scale_threshold", 0.25);
+    declare_parameter<double>("recovery.stuck_minimum_clearance", 0.05);
+    declare_parameter<double>("recovery.stuck_timeout", 1.50);
+    declare_parameter<double>("recovery.stuck_cooldown", 2.00);
     declare_parameter<int>("mppi.random_seed", 7);
     declare_parameter<int>("mppi.nearest_search_radius", 80);
     declare_parameter<double>("mppi.cbf_gamma", 0.35);
@@ -283,6 +295,7 @@ private:
       costmap_topic_ = parameter<std::string>("costmap_topic");
       command_topic_ = parameter<std::string>("command_topic");
       path_topic_ = parameter<std::string>("path_topic");
+      raceline_path_topic_ = parameter<std::string>("raceline_path_topic");
       diagnostics_topic_ = parameter<std::string>("diagnostics_topic");
       map_frame_ = parameter<std::string>("map_frame");
       base_frame_ = parameter<std::string>("base_frame");
@@ -320,6 +333,14 @@ private:
       near_obstacle_distance_ = parameter<double>("mppi.near_obstacle_distance");
       near_obstacle_exploration_scale_ =
         parameter<double>("mppi.near_obstacle_exploration_scale");
+      stuck_speed_threshold_ =
+        parameter<double>("recovery.stuck_speed_threshold");
+      stuck_speed_scale_threshold_ =
+        parameter<double>("recovery.stuck_speed_scale_threshold");
+      stuck_minimum_clearance_ =
+        parameter<double>("recovery.stuck_minimum_clearance");
+      stuck_timeout_ = parameter<double>("recovery.stuck_timeout");
+      stuck_cooldown_ = parameter<double>("recovery.stuck_cooldown");
       if (!positive(control_frequency_) || !positive(state_timeout_) ||
         !positive(costmap_timeout_) || !positive(costmap_processing_frequency_) ||
         !positive(output_timeout_) || !positive(tf_timeout_) || !positive(max_solve_time_ms_) ||
@@ -328,9 +349,18 @@ private:
         !positive(near_obstacle_distance_) ||
         !std::isfinite(near_obstacle_exploration_scale_) ||
         near_obstacle_exploration_scale_ < 1.0 ||
+        !positive(stuck_speed_threshold_) ||
+        !std::isfinite(stuck_speed_scale_threshold_) ||
+        stuck_speed_scale_threshold_ < 0.0 || stuck_speed_scale_threshold_ > 1.0 ||
+        !std::isfinite(stuck_minimum_clearance_) || stuck_minimum_clearance_ < 0.0 ||
+        !positive(stuck_timeout_) || !positive(stuck_cooldown_) ||
         occupied_threshold_ < 0 || occupied_threshold_ > 100)
       {
         error = "node timing or occupancy parameters are out of range";
+        return false;
+      }
+      if (raceline_path_topic_.empty()) {
+        error = "raceline_path_topic must not be empty";
         return false;
       }
       backend_ = makeBackend(requested_backend_, mppi_, vehicle_);
@@ -354,21 +384,10 @@ private:
     command_publisher_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
       command_topic_, rclcpp::QoS(1).reliable());
     path_publisher_ = create_publisher<nav_msgs::msg::Path>(path_topic_, rclcpp::QoS(1));
+    raceline_path_publisher_ = create_publisher<nav_msgs::msg::Path>(
+      raceline_path_topic_, rclcpp::QoS(1).reliable().transient_local());
     diagnostic_publisher_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
       diagnostics_topic_, rclcpp::QoS(10));
-    odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
-      odom_topic_, rclcpp::QoS(10),
-      std::bind(&MppiControllerNode::odomCallback, this, std::placeholders::_1));
-    costmap_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-      costmap_topic_, rclcpp::QoS(1).reliable(),
-      std::bind(&MppiControllerNode::costmapCallback, this, std::placeholders::_1));
-    obstacles_subscription_ = create_subscription<roboracer_msgs::msg::TrackedObstacleArray>(
-      obstacles_topic_, rclcpp::QoS(1).reliable(),
-      std::bind(&MppiControllerNode::obstaclesCallback, this, std::placeholders::_1));
-    race_state_subscription_ = create_subscription<roboracer_msgs::msg::RaceState>(
-      race_state_topic_, rclcpp::QoS(1).reliable(),
-      std::bind(&MppiControllerNode::raceStateCallback, this, std::placeholders::_1));
-
     if (!backend_->warmup(*race_line_, nullptr)) {
       RCLCPP_ERROR(
         get_logger(), "%s MPPI warmup failed; check CUDA runtime, race line, and vehicle bounds",
@@ -376,6 +395,28 @@ private:
       return CallbackReturn::FAILURE;
     }
     backend_->reset();
+    rclcpp::SubscriptionOptions sensor_options;
+    sensor_options.callback_group = sensor_callback_group_;
+    rclcpp::SubscriptionOptions costmap_options;
+    costmap_options.callback_group = costmap_callback_group_;
+    odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
+      odom_topic_, rclcpp::QoS(10),
+      std::bind(&MppiControllerNode::odomCallback, this, std::placeholders::_1),
+      sensor_options);
+    costmap_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+      costmap_topic_, rclcpp::QoS(1).reliable(),
+      std::bind(&MppiControllerNode::costmapCallback, this, std::placeholders::_1),
+      costmap_options);
+    obstacles_subscription_ = create_subscription<roboracer_msgs::msg::TrackedObstacleArray>(
+      obstacles_topic_, rclcpp::QoS(1).reliable(),
+      std::bind(&MppiControllerNode::obstaclesCallback, this, std::placeholders::_1),
+      sensor_options);
+    race_state_subscription_ = create_subscription<roboracer_msgs::msg::RaceState>(
+      race_state_topic_, rclcpp::QoS(1).reliable(),
+      std::bind(&MppiControllerNode::raceStateCallback, this, std::placeholders::_1),
+      sensor_options);
+    stuck_since_.reset();
+    last_stuck_recovery_time_.reset();
     RCLCPP_INFO(
       get_logger(), "Configured %s backend: %zu rollouts x %zu steps, %.1f Hz",
       backend_->name().c_str(), mppi_.rollout_count, mppi_.horizon_steps, control_frequency_);
@@ -386,10 +427,15 @@ private:
   {
     command_publisher_->on_activate();
     path_publisher_->on_activate();
+    raceline_path_publisher_->on_activate();
     diagnostic_publisher_->on_activate();
+    publishRaceLine(now());
     const auto period = rclcpp::Duration::from_seconds(1.0 / control_frequency_);
     control_timer_ = rclcpp::create_timer(
-      this, get_clock(), period, std::bind(&MppiControllerNode::controlTick, this));
+      this, get_clock(), period, std::bind(&MppiControllerNode::controlTick, this),
+      control_callback_group_);
+    stuck_since_.reset();
+    last_stuck_recovery_time_.reset();
     last_output_time_ = now();
     RCLCPP_INFO(get_logger(), "MPPI controller activated; output=%s", command_topic_.c_str());
     return CallbackReturn::SUCCESS;
@@ -401,6 +447,7 @@ private:
     publishStop("deactivated", diagnostic_msgs::msg::DiagnosticStatus::WARN);
     command_publisher_->on_deactivate();
     path_publisher_->on_deactivate();
+    raceline_path_publisher_->on_deactivate();
     diagnostic_publisher_->on_deactivate();
     return CallbackReturn::SUCCESS;
   }
@@ -414,6 +461,7 @@ private:
     race_state_subscription_.reset();
     command_publisher_.reset();
     path_publisher_.reset();
+    raceline_path_publisher_.reset();
     diagnostic_publisher_.reset();
     tf_listener_.reset();
     tf_buffer_.reset();
@@ -428,6 +476,8 @@ private:
       latest_race_state_.reset();
       last_localization_jump_time_.reset();
     }
+    stuck_since_.reset();
+    last_stuck_recovery_time_.reset();
     {
       std::lock_guard<std::mutex> lock(costmap_callback_mutex_);
       last_costmap_processing_time_.reset();
@@ -619,6 +669,9 @@ private:
   void controlTick()
   {
     const rclcpp::Time tick_time = now();
+    active_measured_speed_ = std::numeric_limits<double>::quiet_NaN();
+    active_recovery_speed_threshold_ = std::numeric_limits<double>::quiet_NaN();
+    active_stuck_duration_ = 0.0;
     const double output_age = (tick_time - last_output_time_).seconds();
     if (!std::isfinite(output_age) || output_age < -0.02 || output_age > output_timeout_) {
       safeResetBackend();
@@ -684,6 +737,7 @@ private:
 
     MppiRequest request;
     request.initial_state = timed_state->state;
+    active_measured_speed_ = request.initial_state.speed;
     if (stateWithinLimits(request.initial_state, vehicle_)) {
       try {
         request.initial_state = propagateState(
@@ -826,6 +880,55 @@ private:
       return;
     }
 
+    const double requested_target_speed =
+      result.metrics.target_speed * request.behavior.speed_scale;
+    active_recovery_speed_threshold_ = stuck_speed_threshold_;
+    const bool stopped_despite_forward_request =
+      result.reason == "ok_braking_fallback" &&
+      request.initial_state.speed <= active_recovery_speed_threshold_ &&
+      request.behavior.speed_scale >= stuck_speed_scale_threshold_ &&
+      requested_target_speed > stuck_speed_threshold_ &&
+      result.metrics.minimum_clearance >= stuck_minimum_clearance_ &&
+      request_obstacles.empty();
+    if (stopped_despite_forward_request) {
+      if (!stuck_since_.has_value()) {
+        stuck_since_ = tick_time;
+      }
+      const double stuck_duration = (tick_time - *stuck_since_).seconds();
+      active_stuck_duration_ = std::max(0.0, stuck_duration);
+      const bool cooldown_elapsed =
+        !last_stuck_recovery_time_.has_value() ||
+        (tick_time - *last_stuck_recovery_time_).seconds() >= stuck_cooldown_;
+      if (std::isfinite(stuck_duration) && stuck_duration >= stuck_timeout_ &&
+        cooldown_elapsed)
+      {
+        // The CUDA importance sampler can converge to a self-reinforcing
+        // braking warm start. Resetting is safe: the backend seeds a
+        // curvature-aware race-line tracking sequence, then still repairs and
+        // validates it against the same footprint and collision constraints.
+        safeResetBackend();
+        last_stuck_recovery_time_ = tick_time;
+        stuck_since_.reset();
+        publishStop(
+          "stuck_warm_start_recovery",
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          state_age, &result, costmap_age);
+        // Recovery is a sampler restart, not a real braking interval. Do not
+        // extrapolate the next measured state with publishStop()'s fail-safe
+        // deceleration.
+        last_applied_control_ = Control{};
+        last_command_time_.reset();
+        RCLCPP_WARN(
+          get_logger(),
+          "Reset CUDA warm start after %.2f s stationary under a forward request",
+          stuck_duration);
+        return;
+      }
+    } else {
+      stuck_since_.reset();
+      active_stuck_duration_ = 0.0;
+    }
+
     double command_dt = mppi_.dt;
     if (last_command_time_.has_value()) {
       const double elapsed = (tick_time - *last_command_time_).seconds();
@@ -912,6 +1015,36 @@ private:
     path_publisher_->publish(path);
   }
 
+  void publishRaceLine(const rclcpp::Time & stamp)
+  {
+    if (raceline_path_publisher_ == nullptr ||
+      !raceline_path_publisher_->is_activated() ||
+      !race_line_.has_value() || !race_line_->valid())
+    {
+      return;
+    }
+
+    nav_msgs::msg::Path path;
+    path.header.stamp = stamp;
+    path.header.frame_id = map_frame_;
+    const auto & waypoints = race_line_->waypoints();
+    path.poses.reserve(waypoints.size() + 1U);
+    for (const Waypoint & waypoint : waypoints) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = path.header;
+      pose.pose.position.x = waypoint.x;
+      pose.pose.position.y = waypoint.y;
+      pose.pose.orientation.z = std::sin(waypoint.yaw * 0.5);
+      pose.pose.orientation.w = std::cos(waypoint.yaw * 0.5);
+      path.poses.push_back(pose);
+    }
+    // RaceLine is cyclic; close the loop explicitly for RViz Path rendering.
+    if (!path.poses.empty()) {
+      path.poses.push_back(path.poses.front());
+    }
+    raceline_path_publisher_->publish(path);
+  }
+
   static diagnostic_msgs::msg::KeyValue diagnosticValue(
     const std::string & key, double value)
   {
@@ -961,6 +1094,12 @@ private:
     stale_value.value = obstacles_stale ? "true" : "false";
     status.values.push_back(std::move(stale_value));
     status.values.push_back(diagnosticValue("exploration_scale", exploration_scale));
+    status.values.push_back(diagnosticValue(
+      "measured_speed", active_measured_speed_));
+    status.values.push_back(diagnosticValue(
+      "recovery_speed_threshold", active_recovery_speed_threshold_));
+    status.values.push_back(diagnosticValue(
+      "recovery_stagnation_age_s", active_stuck_duration_));
     status.values.push_back(diagnosticValue(
       "race_state_age_s", active_race_state_age_));
     status.values.push_back(diagnosticValue(
@@ -1056,6 +1195,7 @@ private:
   std::string costmap_topic_;
   std::string command_topic_;
   std::string path_topic_;
+  std::string raceline_path_topic_;
   std::string diagnostics_topic_;
   std::string map_frame_;
   std::string base_frame_;
@@ -1081,6 +1221,16 @@ private:
   bool require_race_state_{false};
   double near_obstacle_distance_{0.50};
   double near_obstacle_exploration_scale_{1.50};
+  double stuck_speed_threshold_{0.05};
+  double stuck_speed_scale_threshold_{0.25};
+  double stuck_minimum_clearance_{0.05};
+  double stuck_timeout_{1.50};
+  double stuck_cooldown_{2.00};
+  double active_recovery_speed_threshold_{
+    std::numeric_limits<double>::quiet_NaN()};
+  double active_measured_speed_{
+    std::numeric_limits<double>::quiet_NaN()};
+  double active_stuck_duration_{0.0};
   MppiBehavior active_behavior_{};
   double active_race_state_age_{std::numeric_limits<double>::quiet_NaN()};
   double active_track_confidence_{1.0};
@@ -1097,11 +1247,16 @@ private:
   std::optional<TimedRaceState> latest_race_state_;
   std::optional<rclcpp::Time> last_localization_jump_time_;
   std::optional<rclcpp::Time> last_costmap_processing_time_;
+  std::optional<rclcpp::Time> stuck_since_;
+  std::optional<rclcpp::Time> last_stuck_recovery_time_;
   double last_commanded_steering_{0.0};
   Control last_applied_control_{};
   std::optional<rclcpp::Time> last_command_time_;
   rclcpp::Time last_output_time_{0, 0, RCL_ROS_TIME};
 
+  rclcpp::CallbackGroup::SharedPtr control_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr costmap_callback_group_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
@@ -1113,6 +1268,8 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
     command_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
+  rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr
+    raceline_path_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostic_publisher_;
   rclcpp::TimerBase::SharedPtr control_timer_;

@@ -24,8 +24,27 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(OpenMP QUIET)
 
-set(MPPI_CONTROLLER_CUDA_ARCHITECTURE "87" CACHE STRING
-  "CUDA architecture for mppi_controller (87 is Jetson Orin, 89 is Ada)")
+set(_mppi_controller_cuda_arch_default "87")
+if(DEFINED ENV{ROBORACER_CUDA_ARCH} AND NOT "$ENV{ROBORACER_CUDA_ARCH}" STREQUAL "")
+  set(_mppi_controller_cuda_arch_default "$ENV{ROBORACER_CUDA_ARCH}")
+else()
+  find_program(_mppi_controller_nvidia_smi nvidia-smi)
+  if(_mppi_controller_nvidia_smi)
+    execute_process(
+      COMMAND "${_mppi_controller_nvidia_smi}" --query-gpu=compute_cap --format=csv,noheader,nounits
+      OUTPUT_VARIABLE _mppi_controller_compute_caps
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_mppi_controller_compute_caps)
+      string(REGEX MATCH "[0-9]+\\.[0-9]+" _mppi_controller_first_compute_cap "${_mppi_controller_compute_caps}")
+      if(_mppi_controller_first_compute_cap)
+        string(REPLACE "." "" _mppi_controller_cuda_arch_default "${_mppi_controller_first_compute_cap}")
+      endif()
+    endif()
+  endif()
+endif()
+set(MPPI_CONTROLLER_CUDA_ARCHITECTURE "${_mppi_controller_cuda_arch_default}" CACHE STRING
+  "CUDA architecture for mppi_controller (87 is Jetson Orin, 89 is RTX 40 Ada)")
 
 # MPPI-Generic v0.9.0 invokes legacy FindCUDA when used with Ubuntu 22.04's
 # CMake 3.22.  Its architecture table predates Ada.  Mark detection complete

@@ -227,7 +227,7 @@ TEST(Cost, DetectsObstacleInsideFootprintBetweenSparseSampleLocations)
   EXPECT_GT(cost.collision, 0.0);
 }
 
-TEST(Cost, TreatsRepairClearanceAsHardRolloutBoundary)
+TEST(Cost, TreatsRepairClearanceAsSoftBufferBeyondHardSafetyMargin)
 {
   const RaceLine track = makeCircle(false, 2.0);
   MppiConfig permissive = fastConfig();
@@ -255,8 +255,14 @@ TEST(Cost, TreatsRepairClearanceAsHardRolloutBoundary)
   const CostBreakdown guarded_cost = guarded_backend.evaluateTrajectory(
     state, controls, track, &field);
   EXPECT_EQ(permissive_cost.collision, 0.0);
-  EXPECT_GT(guarded_cost.collision, 0.0);
+  EXPECT_EQ(guarded_cost.collision, 0.0);
   EXPECT_GT(guarded_cost.cbf, permissive_cost.cbf);
+
+  std::vector<Control> recovery_controls(guarded.horizon_steps, Control{});
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+  EXPECT_TRUE(guarded_backend.repairControls(
+      state, recovery_controls, track, &field, deadline));
 }
 
 TEST(Cost, ClampsRaceLineSpeedToConfiguredVehicleMaximum)

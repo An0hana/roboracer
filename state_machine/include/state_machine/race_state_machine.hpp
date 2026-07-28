@@ -1,7 +1,7 @@
 // Copyright 2026 RoboRacer Team
 
-#ifndef RACE_MANAGER__RACE_STATE_MACHINE_HPP_
-#define RACE_MANAGER__RACE_STATE_MACHINE_HPP_
+#ifndef STATE_MACHINE__RACE_STATE_MACHINE_HPP_
+#define STATE_MACHINE__RACE_STATE_MACHINE_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -35,6 +35,8 @@ enum class PreferredSide : std::int8_t
 struct StateMachineConfig
 {
   double follow_distance{4.0};
+  double follow_time_headway{1.50};
+  double maximum_follow_distance{12.0};
   double opponent_corridor_half_width{0.80};
   double pass_margin{0.30};
   double transition_confirmation{0.20};
@@ -43,6 +45,7 @@ struct StateMachineConfig
   double opponent_lost_timeout{0.50};
   double return_blend_duration{1.50};
   double overtake_lateral_offset{0.45};
+  bool allow_direct_overtake{true};
 
   double cruise_speed_scale{1.0};
   double trailing_speed_scale{0.60};
@@ -60,6 +63,8 @@ struct StateObservation
   bool opponent_detected{false};
   double opponent_longitudinal{0.0};
   double opponent_lateral{0.0};
+  double ego_speed{0.0};
+  double opponent_longitudinal_speed{0.0};
   bool left_available{false};
   bool right_available{false};
   double left_clearance_score{0.0};
@@ -104,7 +109,11 @@ public:
   [[nodiscard]] BehaviorState behaviorState() const noexcept;
 
 private:
+  [[nodiscard]] double activeFollowDistance(
+    const StateObservation & observation) const;
   [[nodiscard]] bool opponentAhead(const StateObservation & observation) const;
+  [[nodiscard]] PreferredSide preferredOvertakeSide(
+    const StateObservation & observation) const;
   [[nodiscard]] bool transitionConfirmed(
     int target, const std::string & reason, double now, double confirmation);
   void transitionSafety(
@@ -134,4 +143,4 @@ private:
 
 }  // namespace state_machine
 
-#endif  // RACE_MANAGER__RACE_STATE_MACHINE_HPP_
+#endif  // STATE_MACHINE__RACE_STATE_MACHINE_HPP_

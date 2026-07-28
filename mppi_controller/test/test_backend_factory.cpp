@@ -21,7 +21,7 @@ TEST(BackendFactory, AutoReportsTheBackendActuallyCompiled)
 {
   auto backend = makeBackend("auto", MppiConfig{}, VehicleConfig{});
   ASSERT_NE(backend, nullptr);
-  if (cudaBackendCompiled()) {
+  if (cudaBackendCompiled() && cudaBackendDeviceCompatible()) {
     EXPECT_EQ(backend->name(), "cuda_mppi_generic_v0.9.0");
   } else {
     EXPECT_EQ(backend->name(), "cpu_reference");
@@ -30,7 +30,7 @@ TEST(BackendFactory, AutoReportsTheBackendActuallyCompiled)
 
 TEST(BackendFactory, ExplicitCudaNeverSilentlyFallsBack)
 {
-  if (cudaBackendCompiled()) {
+  if (cudaBackendCompiled() && cudaBackendDeviceCompatible()) {
     auto backend = makeBackend("cuda", MppiConfig{}, VehicleConfig{});
     ASSERT_NE(backend, nullptr);
     EXPECT_EQ(backend->name(), "cuda_mppi_generic_v0.9.0");
