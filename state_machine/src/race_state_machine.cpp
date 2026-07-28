@@ -20,6 +20,9 @@ bool finite(double value)
 void validateConfig(const StateMachineConfig & config)
 {
   if (!finite(config.follow_distance) || config.follow_distance <= 0.0 ||
+    !finite(config.follow_time_headway) || config.follow_time_headway < 0.0 ||
+    !finite(config.maximum_follow_distance) ||
+    config.maximum_follow_distance < config.follow_distance ||
     !finite(config.opponent_corridor_half_width) ||
     config.opponent_corridor_half_width <= 0.0 ||
     !finite(config.pass_margin) || config.pass_margin < 0.0 ||
@@ -100,6 +103,8 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
   if (!finite(observation.time) ||
     !finite(observation.opponent_longitudinal) ||
     !finite(observation.opponent_lateral) ||
+    !finite(observation.ego_speed) ||
+    !finite(observation.opponent_longitudinal_speed) ||
     !finite(observation.left_clearance_score) ||
     !finite(observation.right_clearance_score) ||
     !finite(observation.track_confidence))
@@ -168,13 +173,19 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
   switch (behavior_state_) {
     case BehaviorState::RACING:
       if (opponentAhead(observation) && behavior_can_change) {
+        const PreferredSide side = config_.allow_direct_overtake ?
+          preferredOvertakeSide(observation) : PreferredSide::NONE;
+        const BehaviorState target =
+          side == PreferredSide::NONE ?
+          BehaviorState::TRAILING : BehaviorState::OVERTAKE;
+        const std::string reason =
+          side == PreferredSide::NONE ?
+          "opponent_ahead" : "clear_corridor_ahead";
         if (transitionConfirmed(
-            static_cast<int>(BehaviorState::TRAILING), "opponent_ahead",
+            static_cast<int>(target), reason,
             observation.time, config_.transition_confirmation))
         {
-          transitionBehavior(
-            BehaviorState::TRAILING, PreferredSide::NONE,
-            "opponent_ahead", observation.time);
+          transitionBehavior(target, side, reason, observation.time);
         }
       } else {
         clearPendingTransition();
@@ -193,13 +204,7 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
       } else if (behavior_can_change &&
         (observation.left_available || observation.right_available))
       {
-        PreferredSide side = PreferredSide::NONE;
-        if (observation.left_available && observation.right_available) {
-          side = observation.left_clearance_score >= observation.right_clearance_score ?
-            PreferredSide::LEFT : PreferredSide::RIGHT;
-        } else {
-          side = observation.left_available ? PreferredSide::LEFT : PreferredSide::RIGHT;
-        }
+        const PreferredSide side = preferredOvertakeSide(observation);
         const std::string reason =
           side == PreferredSide::LEFT ? "left_corridor_clear" : "right_corridor_clear";
         if (transitionConfirmed(
@@ -254,9 +259,35 @@ bool RaceStateMachine::opponentAhead(const StateObservation & observation) const
 {
   return observation.opponent_detected &&
          observation.opponent_longitudinal > 0.0 &&
-         observation.opponent_longitudinal <= config_.follow_distance &&
+         observation.opponent_longitudinal <= activeFollowDistance(observation) &&
          std::abs(observation.opponent_lateral) <=
          config_.opponent_corridor_half_width;
+}
+
+double RaceStateMachine::activeFollowDistance(
+  const StateObservation & observation) const
+{
+  const double closing_speed = std::max(
+    0.0, observation.ego_speed - observation.opponent_longitudinal_speed);
+  return std::clamp(
+    config_.follow_distance + config_.follow_time_headway * closing_speed,
+    config_.follow_distance, config_.maximum_follow_distance);
+}
+
+PreferredSide RaceStateMachine::preferredOvertakeSide(
+  const StateObservation & observation) const
+{
+  if (observation.left_available && observation.right_available) {
+    return observation.left_clearance_score >= observation.right_clearance_score ?
+           PreferredSide::LEFT : PreferredSide::RIGHT;
+  }
+  if (observation.left_available) {
+    return PreferredSide::LEFT;
+  }
+  if (observation.right_available) {
+    return PreferredSide::RIGHT;
+  }
+  return PreferredSide::NONE;
 }
 
 bool RaceStateMachine::transitionConfirmed(

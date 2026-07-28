@@ -75,12 +75,22 @@ public:
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
     publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
       costmap_topic_, rclcpp::QoS(1).reliable());
+    odom_callback_group_ = create_callback_group(
+      rclcpp::CallbackGroupType::Reentrant);
+    scan_callback_group_ = create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions odom_options;
+    odom_options.callback_group = odom_callback_group_;
+    rclcpp::SubscriptionOptions scan_options;
+    scan_options.callback_group = scan_callback_group_;
     odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, rclcpp::QoS(10).reliable(),
-      std::bind(&LocalCostmapNode::odomCallback, this, std::placeholders::_1));
+      std::bind(&LocalCostmapNode::odomCallback, this, std::placeholders::_1),
+      odom_options);
     scan_subscription_ = create_subscription<sensor_msgs::msg::LaserScan>(
       scan_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&LocalCostmapNode::scanCallback, this, std::placeholders::_1));
+      std::bind(&LocalCostmapNode::scanCallback, this, std::placeholders::_1),
+      scan_options);
 
     RCLCPP_INFO(
       get_logger(), "Local costmap: scan=%s odom=%s output=%s %.1fx%.1fm @ %.3fm",
@@ -233,6 +243,8 @@ private:
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher_;
+  rclcpp::CallbackGroup::SharedPtr odom_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr scan_callback_group_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_subscription_;
 
@@ -247,7 +259,10 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<local_costmap::LocalCostmapNode>());
+  auto node = std::make_shared<local_costmap::LocalCostmapNode>();
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 3U);
+  executor.add_node(node);
+  executor.spin();
   rclcpp::shutdown();
   return 0;
 }

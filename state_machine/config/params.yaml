@@ -22,12 +22,17 @@ state_machine:
     confidence_rise_time: 1.50
     confidence_fall_time: 0.35
 
+    # Start behavior arbitration before MPPI's collision cost dominates.
+    # Trigger distance = follow_distance + closing_speed * follow_time_headway.
     follow_distance: 4.0
+    follow_time_headway: 1.5
+    maximum_follow_distance: 12.0
     opponent_corridor_half_width: 0.80
     pass_margin: 0.30
     corridor_clearance_radius: 0.24
     emergency_stop_distance: 0.55
     overtake_lateral_offset: 0.45
+    allow_direct_overtake: true
 
     transition_confirmation: 0.20
     minimum_state_duration: 0.40

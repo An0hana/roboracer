@@ -625,8 +625,13 @@ private:
     const float map_margin = fminf(
       footprintMapMargin(state),
       footprintObstacleMargin(state, rollout_time));
-    const float safe_map_margin = map_margin - this->params_.barrier_distance;
-    const float map_violation = fmaxf(0.0F, -safe_map_margin);
+    // safety_margin is the hard collision envelope. barrier_distance is an
+    // additional preferred clearance used by the optimizer; making both hard
+    // leaves a vehicle already inside the preferred band with no admissible
+    // escape trajectory.
+    const float preferred_map_margin =
+      map_margin - this->params_.barrier_distance;
+    const float map_violation = fmaxf(0.0F, -preferred_map_margin);
 
     float map_soft_barrier = 0.0F;
     if (this->params_.map_valid != 0 || this->params_.obstacle_count > 0) {
@@ -667,7 +672,7 @@ private:
     // scan-derived local distance field can declare a collision.
     cost += this->params_.weight_barrier *
       this->params_.safety_weight_scale * squareFloat(map_soft_barrier);
-    if (safe_map_margin < 0.0F) {
+    if (map_margin < 0.0F) {
       cost += this->params_.weight_collision;
       if (crash_status != nullptr) {
         crash_status[0] = 1;
@@ -832,6 +837,7 @@ public:
     validator_.configure(config, vehicle);
     config_ = config;
     vehicle_ = vehicle;
+    seed_model_ = BicycleModel(vehicle_);
     last_control_ = Control{};
     launch_seed_pending_ = true;
     initialized_ = false;
@@ -989,12 +995,15 @@ public:
       prepareCost(
         request.initial_state, *request.race_line, request.obstacles,
         request.behavior);
-      if (launch_seed_pending_ && request.initial_state.speed <= 0.05) {
-        ControllerT::control_trajectory launch_controls =
-          ControllerT::control_trajectory::Zero();
-        launch_controls.row(kAccelerationIndex).setConstant(
-          static_cast<float>(vehicle_.max_acceleration));
-        controller_->updateImportanceSampler(launch_controls);
+      // Preserve the measured-state clearance even when no candidate can be
+      // repaired. This makes an actual safety-margin violation distinguishable
+      // from a sampler failure in /diagnostics.
+      result.metrics = validator_.trajectoryMetrics(
+        request.initial_state, {}, *request.race_line,
+        request.distance_field, request.obstacles);
+      if (launch_seed_pending_) {
+        controller_->updateImportanceSampler(
+          toCudaControls(racelineTrackingControls(request)));
         launch_seed_pending_ = false;
       }
       auto sampling_params = sampler_->getParams();
@@ -1036,15 +1045,15 @@ public:
         config_.repair_budget_ms);
       const auto repair_deadline = std::chrono::steady_clock::now() +
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(repair_duration);
-      bool used_braking_fallback = false;
+      SafeFallbackKind fallback_kind = SafeFallbackKind::kNone;
       if (!validator_.repairControls(
           request.initial_state, controls, *request.race_line,
           request.distance_field, repair_deadline, request.obstacles))
       {
-        if (!selectBrakingFallback(request, controls, controls)) {
+        fallback_kind = selectSafeFallback(request, controls, controls);
+        if (fallback_kind == SafeFallbackKind::kNone) {
           return finish("cuda_solution_repair_failed");
         }
-        used_braking_fallback = true;
       }
 
       result.control_sequence = controls;
@@ -1055,19 +1064,19 @@ public:
         &request.behavior);
       bool finite_cost = std::isfinite(result.cost.total());
       bool complete_trajectory_safe = result.cost.collision <= 0.0;
-      if ((!finite_cost || !complete_trajectory_safe) &&
-        selectBrakingFallback(request, controls, controls))
-      {
-        used_braking_fallback = true;
-        result.control_sequence = controls;
-        result.control = controls.front();
-        result.predicted_states.clear();
-        result.cost = validator_.evaluateTrajectory(
-          request.initial_state, controls, *request.race_line,
-          request.distance_field, &result.predicted_states, request.obstacles,
-          &request.behavior);
-        finite_cost = std::isfinite(result.cost.total());
-        complete_trajectory_safe = result.cost.collision <= 0.0;
+      if (!finite_cost || !complete_trajectory_safe) {
+        fallback_kind = selectSafeFallback(request, controls, controls);
+        if (fallback_kind != SafeFallbackKind::kNone) {
+          result.control_sequence = controls;
+          result.control = controls.front();
+          result.predicted_states.clear();
+          result.cost = validator_.evaluateTrajectory(
+            request.initial_state, controls, *request.race_line,
+            request.distance_field, &result.predicted_states, request.obstacles,
+            &request.behavior);
+          finite_cost = std::isfinite(result.cost.total());
+          complete_trajectory_safe = result.cost.collision <= 0.0;
+        }
       }
       result.metrics = validator_.trajectoryMetrics(
         request.initial_state, result.predicted_states, *request.race_line,
@@ -1075,23 +1084,33 @@ public:
       result.valid = finite_cost && complete_trajectory_safe;
       result.reason = !finite_cost ? "cuda_nonfinite_final_cost" :
         (complete_trajectory_safe ?
-        (used_braking_fallback ? "ok_braking_fallback" : "ok") :
+        (fallback_kind == SafeFallbackKind::kRaceline ? "ok_raceline_fallback" :
+        (fallback_kind == SafeFallbackKind::kBraking ? "ok_braking_fallback" : "ok")) :
         "cuda_final_trajectory_unsafe");
       result.best_rollout = 0U;  // MPPI-Generic v0.9.0 does not expose this index.
       result.solve_time_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
 
       if (result.valid) {
-        ControllerT::control_trajectory safe_controls;
-        for (int step = 0; step < kCudaTimesteps; ++step) {
-          safe_controls(kSteeringRateIndex, step) =
-            static_cast<float>(controls[static_cast<std::size_t>(step)].steering_rate);
-          safe_controls(kAccelerationIndex, step) =
-            static_cast<float>(controls[static_cast<std::size_t>(step)].acceleration);
-        }
-        controller_->updateImportanceSampler(safe_controls);
         last_control_ = result.control;
-        controller_->slideControlSequence(1);
+        if (fallback_kind == SafeFallbackKind::kBraking) {
+          // A fallback is an emergency command, not an optimized solution.
+          // Feeding its all-braking sequence back into the importance sampler
+          // creates a self-reinforcing zero-speed local minimum. Preserve the
+          // CUDA solution as the exploration center while moving; near rest
+          // seed a curvature-aware race-line tracking sequence. Every resulting
+          // trajectory still passes the same repair/validation stage.
+          if (request.initial_state.speed <= 0.10) {
+            controller_->updateImportanceSampler(
+              toCudaControls(racelineTrackingControls(request)));
+            launch_seed_pending_ = false;
+          } else {
+            controller_->slideControlSequence(1);
+          }
+        } else {
+          controller_->updateImportanceSampler(toCudaControls(controls));
+          controller_->slideControlSequence(1);
+        }
       }
       return result;
     } catch (const std::exception & exception) {
@@ -1105,25 +1124,90 @@ public:
   }
 
 private:
-  bool selectBrakingFallback(
+  enum class SafeFallbackKind
+  {
+    kNone,
+    kRaceline,
+    kBraking
+  };
+
+  ControllerT::control_trajectory toCudaControls(
+    const std::vector<Control> & controls) const
+  {
+    ControllerT::control_trajectory cuda_controls =
+      ControllerT::control_trajectory::Zero();
+    const std::size_t count = std::min(
+      controls.size(), static_cast<std::size_t>(kCudaTimesteps));
+    for (std::size_t step = 0U; step < count; ++step) {
+      cuda_controls(kSteeringRateIndex, static_cast<int>(step)) =
+        static_cast<float>(controls[step].steering_rate);
+      cuda_controls(kAccelerationIndex, static_cast<int>(step)) =
+        static_cast<float>(controls[step].acceleration);
+    }
+    return cuda_controls;
+  }
+
+  std::vector<Control> racelineTrackingControls(const MppiRequest & request) const
+  {
+    std::vector<Control> controls;
+    controls.reserve(kCudaTimesteps);
+    if (request.race_line == nullptr || !request.race_line->valid()) {
+      controls.resize(kCudaTimesteps);
+      return controls;
+    }
+
+    State state = seed_model_.clampState(request.initial_state);
+    std::size_t hint = request.race_line->nearestIndex(state.x, state.y);
+    for (int step = 0; step < kCudaTimesteps; ++step) {
+      const TrackProjection projection = request.race_line->project(
+        state, hint, config_.nearest_search_radius);
+      hint = projection.index;
+      const Waypoint & reference = request.race_line->waypoints()[hint];
+      const double lateral_error =
+        projection.lateral_error - request.behavior.lateral_reference_offset;
+      const double desired_heading = normalizeAngle(
+        reference.yaw - std::atan(1.5 * lateral_error));
+      const double heading_correction = normalizeAngle(desired_heading - state.yaw);
+      const double lookahead = std::max(0.45, 0.45 + 0.25 * state.speed);
+      const double desired_curvature =
+        reference.curvature + 2.0 * std::sin(heading_correction) / lookahead;
+      const double desired_steering = std::clamp(
+        std::atan(vehicle_.wheelbase * desired_curvature),
+        vehicle_.min_steering, vehicle_.max_steering);
+
+      const double target_speed = std::clamp(
+        std::min(reference.reference_speed, vehicle_.max_speed) *
+        request.behavior.speed_scale,
+        vehicle_.min_speed, vehicle_.max_speed);
+      const Control control = seed_model_.clampControl(Control{
+        (desired_steering - state.steering) / std::max(0.15, config_.dt),
+        (target_speed - state.speed) / 0.50});
+      controls.push_back(control);
+      state = seed_model_.step(state, control, config_.dt);
+    }
+    return controls;
+  }
+
+  SafeFallbackKind selectSafeFallback(
     const MppiRequest & request, const std::vector<Control> & steering_template,
     std::vector<Control> & selected_controls)
   {
     if (request.race_line == nullptr ||
       steering_template.size() != static_cast<std::size_t>(kCudaTimesteps))
     {
-      return false;
+      return SafeFallbackKind::kNone;
     }
 
-    std::array<std::vector<Control>, 2> candidates;
-    candidates[0] = steering_template;
-    for (Control & control : candidates[0]) {
+    std::array<std::vector<Control>, 3> candidates;
+    candidates[0] = racelineTrackingControls(request);
+    candidates[1] = steering_template;
+    for (Control & control : candidates[1]) {
       control.acceleration = vehicle_.min_acceleration;
     }
 
-    candidates[1].resize(kCudaTimesteps);
+    candidates[2].resize(kCudaTimesteps);
     double steering = request.initial_state.steering;
-    for (Control & control : candidates[1]) {
+    for (Control & control : candidates[2]) {
       control.steering_rate = std::clamp(
         -steering / config_.dt,
         vehicle_.min_steering_rate, vehicle_.max_steering_rate);
@@ -1133,9 +1217,10 @@ private:
         vehicle_.min_steering, vehicle_.max_steering);
     }
 
-    bool found = false;
+    SafeFallbackKind selected_kind = SafeFallbackKind::kNone;
     double best_cost = std::numeric_limits<double>::infinity();
-    for (std::vector<Control> & candidate : candidates) {
+    for (std::size_t index = 0U; index < candidates.size(); ++index) {
+      std::vector<Control> & candidate = candidates[index];
       const auto repair_duration = std::chrono::duration<double, std::milli>(
         config_.repair_budget_ms);
       const auto repair_deadline = std::chrono::steady_clock::now() +
@@ -1154,10 +1239,11 @@ private:
       {
         selected_controls = candidate;
         best_cost = cost.total();
-        found = true;
+        selected_kind = index == 0U ?
+          SafeFallbackKind::kRaceline : SafeFallbackKind::kBraking;
       }
     }
-    return found;
+    return selected_kind;
   }
 
   bool initializeController()
@@ -1376,6 +1462,7 @@ private:
   MppiConfig config_{};
   VehicleConfig vehicle_{};
   CpuMppiBackend validator_{};
+  BicycleModel seed_model_{};
   Control last_control_{};
   F1TenthCostParams cost_params_{};
   bool initialized_{false};

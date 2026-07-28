@@ -7,6 +7,7 @@ mppi_controller:
     costmap_topic: /perception/local_costmap
     command_topic: /control/mppi_cmd
     path_topic: /control/mppi_path
+    raceline_path_topic: /debug/raceline
     diagnostics_topic: /diagnostics
     map_frame: map
     base_frame: base_link
@@ -17,9 +18,11 @@ mppi_controller:
     # The scan costmap remains available at 40 Hz; distance transform and CUDA
     # upload only need to match the 20 Hz controller.
     costmap_processing_frequency: 20.0
-    output_timeout: 0.10
+    # Four control periods tolerate occasional non-real-time Linux/RViz
+    # scheduling jitter. Sensor freshness watchdogs remain at 0.10 s.
+    output_timeout: 0.20
     tf_timeout: 0.02
-    max_solve_time_ms: 40.0
+    max_solve_time_ms: 45.0
     localization_position_jump_threshold: 0.50
     localization_yaw_jump_threshold: 0.70
     localization_jump_hold_time: 0.50
@@ -61,7 +64,18 @@ mppi_controller:
       repair_steps: 4
       repair_iterations: 2
       repair_budget_ms: 3.0
+      # Preferred CBF clearance outside vehicle.safety_margin. This is a soft
+      # optimization buffer; safety_margin remains the hard collision limit.
       repair_clearance: 0.05
+
+    recovery:
+      # Escape a braking-only CUDA warm-start local minimum only when the car
+      # is safe, obstacle-free and odometry confirms it is nearly stationary.
+      stuck_speed_threshold: 0.05
+      stuck_speed_scale_threshold: 0.25
+      stuck_minimum_clearance: 0.05
+      stuck_timeout: 1.50
+      stuck_cooldown: 2.00
 
     cuda:
       # Preallocated once during lifecycle configure (4M float cells = 16 MiB).

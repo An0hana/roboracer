@@ -885,6 +885,10 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     const double map_margin = std::min(
       footprintClearance(state, distance_field),
       obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
+    // vehicle_.safety_margin is the hard collision envelope.
+    // repair_clearance is an additional preferred buffer for CBF/boundary
+    // costs. Keeping it soft allows a physically safe vehicle that entered
+    // this buffer to steer back out instead of declaring every control unsafe.
     const double map_h = map_margin - config_.repair_clearance;
     const double progress = signedProgressDelta(
       previous_progress, projection.progress, race_line.length());
@@ -929,7 +933,7 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     }
     cost.cbf += config_.weights.cbf * adaptive.safety_weight_scale *
       (square(map_cbf) + square(map_soft_barrier));
-    if (map_h < 0.0) {
+    if (map_margin < 0.0) {
       cost.collision += config_.weights.collision;
     }
     if (std::abs(projection.heading_error) > config_.maximum_heading_error ||
@@ -1013,7 +1017,7 @@ bool CpuMppiBackend::stateSafe(
     footprintClearance(state, distance_field),
     obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
   return finite(state.x) && finite(state.y) && finite(state.yaw) && finite(state.speed) &&
-         finite(state.steering) && map_margin >= config_.repair_clearance &&
+         finite(state.steering) && map_margin >= 0.0 &&
          std::abs(projection.heading_error) <= config_.maximum_heading_error;
 }
 

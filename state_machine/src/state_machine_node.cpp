@@ -166,6 +166,10 @@ public:
 
     StateMachineConfig config;
     config.follow_distance = declare_parameter<double>("follow_distance", 4.0);
+    config.follow_time_headway =
+      declare_parameter<double>("follow_time_headway", 1.50);
+    config.maximum_follow_distance =
+      declare_parameter<double>("maximum_follow_distance", 12.0);
     config.opponent_corridor_half_width =
       declare_parameter<double>("opponent_corridor_half_width", 0.80);
     config.pass_margin = declare_parameter<double>("pass_margin", 0.30);
@@ -181,6 +185,8 @@ public:
       declare_parameter<double>("return_blend_duration", 1.50);
     config.overtake_lateral_offset =
       declare_parameter<double>("overtake_lateral_offset", 0.45);
+    config.allow_direct_overtake =
+      declare_parameter<bool>("allow_direct_overtake", true);
     overtake_lateral_offset_ = config.overtake_lateral_offset;
     config.cruise_speed_scale =
       declare_parameter<double>("cruise_speed_scale", 1.0);
@@ -381,6 +387,8 @@ private:
       marker_x = latest_odom_->pose.pose.position.x;
       marker_y = latest_odom_->pose.pose.position.y;
       const double ego_yaw = yawFromQuaternion(latest_odom_->pose.pose.orientation);
+      observation.ego_speed =
+        std::max(0.0, latest_odom_->twist.twist.linear.x);
       const double cosine = std::cos(ego_yaw);
       const double sine = std::sin(ego_yaw);
       double nearest_distance = std::numeric_limits<double>::infinity();
@@ -404,6 +412,8 @@ private:
             observation.opponent_detected = true;
             observation.opponent_longitudinal = longitudinal;
             observation.opponent_lateral = lateral;
+            observation.opponent_longitudinal_speed =
+              cosine * obstacle.vx + sine * obstacle.vy;
           }
         }
       }

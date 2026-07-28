@@ -46,7 +46,10 @@ std::unique_ptr<MppiBackend> makeBackend(
 
   if (backend == "auto") {
 #if MPPI_CONTROLLER_HAS_CUDA_BACKEND
-    return makeMppiGenericCudaBackend(config, vehicle);
+    if (cudaDeviceMatchesCompiledArchitecture()) {
+      return makeMppiGenericCudaBackend(config, vehicle);
+    }
+    return makeCpuBackend(config, vehicle);
 #else
     return makeCpuBackend(config, vehicle);
 #endif
@@ -54,6 +57,13 @@ std::unique_ptr<MppiBackend> makeBackend(
 
   if (backend == "cuda") {
 #if MPPI_CONTROLLER_HAS_CUDA_BACKEND
+    if (!cudaDeviceMatchesCompiledArchitecture()) {
+      throw std::runtime_error(
+              "backend='cuda' requested, but the CUDA backend architecture does "
+              "not match the current GPU. Rebuild mppi_generic_vendor and "
+              "mppi_controller with ROBORACER_CUDA_ARCH set to this GPU's "
+              "compute capability, for example 89 on RTX 40 or 87 on Jetson Orin");
+    }
     return makeMppiGenericCudaBackend(config, vehicle);
 #else
     throw std::runtime_error(
