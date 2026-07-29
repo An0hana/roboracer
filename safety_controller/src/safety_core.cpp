@@ -71,6 +71,7 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
   if (!finitePositive(config_.state_timeout) || !finitePositive(config_.scan_timeout) ||
     !finitePositive(config_.command_timeout) ||
     !finiteNonnegative(config_.switch_speed_threshold) ||
+    !finiteNonnegative(config_.stop_steering_center_speed) ||
     !std::isfinite(config_.min_command_speed) ||
     !std::isfinite(config_.max_command_speed) ||
     config_.min_command_speed > config_.max_command_speed ||
@@ -177,6 +178,11 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
 
   if (result.stopped()) {
     result.command = stopCommand();
+    // Keep the measured steering while the vehicle is still moving so an
+    // emergency stop cannot introduce an abrupt lateral transient. Once
+    // stationary, center the wheels and update the latch so a noisy low-speed
+    // yaw-rate estimate cannot hold AEB on a stale curved sweep forever.
+    held_steering_angle_ = result.command.steering_angle;
   } else {
     result.command = selected_command.command;
     result.command.speed = std::clamp(
@@ -302,7 +308,12 @@ AebAssessment SafetyCore::assessAeb() const
 
 DriveCommand SafetyCore::stopCommand() const
 {
-  return DriveCommand{0.0, held_steering_angle_};
+  const double steering = std::abs(current_speed_) <=
+    config_.stop_steering_center_speed ? 0.0 : held_steering_angle_;
+  return DriveCommand{
+    0.0,
+    std::clamp(
+      steering, config_.min_command_steering, config_.max_command_steering)};
 }
 
 SafetyCore::TimedCommand & SafetyCore::commandFor(ControllerMode mode)

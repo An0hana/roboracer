@@ -3,7 +3,7 @@ mppi_controller:
     # Simulation and vehicle deployment both require CUDA. Configuration fails
     # instead of silently falling back when the backend is unavailable.
     backend: cuda
-    odom_topic: /ego_racecar/odom
+    odom_topic: /state_estimation/odom
     costmap_topic: /perception/local_costmap
     command_topic: /control/mppi_cmd
     path_topic: /control/mppi_path
@@ -26,6 +26,10 @@ mppi_controller:
     localization_position_jump_threshold: 0.50
     localization_yaw_jump_threshold: 0.70
     localization_jump_hold_time: 0.50
+    # Real speed can overshoot the command cap slightly and VESC coast-down
+    # may briefly report a small negative value. Clamp only this narrow band
+    # for solver initialization; larger errors still fail safe.
+    measured_speed_tolerance: 0.25
     require_costmap: true
     occupied_threshold: 50
     unknown_is_occupied: false
@@ -67,6 +71,14 @@ mppi_controller:
       # Preferred CBF clearance outside vehicle.safety_margin. This is a soft
       # optimization buffer; safety_margin remains the hard collision limit.
       repair_clearance: 0.05
+      # A 5 cm local grid can put a stationary pose a few millimetres inside
+      # the 5 cm safety envelope. Allow at most 1.5 cm of initial envelope
+      # violation, only below 0.10 m/s, and require the complete 5 cm margin
+      # to be restored within 0.6 s. Physical footprint overlap is never
+      # accepted and AEB remains independent.
+      initial_clearance_tolerance: 0.015
+      clearance_recovery_steps: 12
+      clearance_recovery_speed_threshold: 0.10
 
     recovery:
       # Escape a braking-only CUDA warm-start local minimum only when the car
@@ -107,7 +119,11 @@ mppi_controller:
       control: 0.15
       control_change: 0.4
       lateral_acceleration: 0.25
-      boundary: 600.0
+      # The CSV widths are only prior geometry and can disagree with the
+      # deformed physical track. Live costmap CBF/collision and the independent
+      # AEB remain authoritative; lateral/heading terms still pull toward the
+      # race line without forcing a safe off-line vehicle to stop.
+      boundary: 0.0
       cbf: 400.0
       collision: 1000000.0
       terminal_lateral: 80.0

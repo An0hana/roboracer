@@ -3,8 +3,7 @@ yesense_pub:
         serial_port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B31017690-if00"
         baud_rate: 460800
         frame_id: "gyro_link"
-        driver_type: "ros_serial"
+        driver_type: "linux_serial"
         imu_topic_ros: "imu/data_raw"
         imu_topic: "imu_data"
-
 

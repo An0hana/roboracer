@@ -33,7 +33,10 @@ class ManualControlNode(Node):
         self.declare_parameter("max_rpm", 5000)
         self.declare_parameter("deadzone", 0.08)
         self.declare_parameter("smoothing", 0.15)
-        self.declare_parameter("stale_timeout", 0.5)
+        # evdev reports changes, not a periodic heartbeat. A non-zero
+        # inactivity timeout would therefore stop a valid held-stick command.
+        # Physical disconnects are reported through GamepadSnapshot.connected.
+        self.declare_parameter("stale_timeout", 0.0)
 
         # Motor command sent to the mux. Match your autonomous stack's units:
         # if ackermann_to_vesc publishes ERPM on /commands/motor/speed, keep

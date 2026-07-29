@@ -5,7 +5,9 @@ manual_ctrl:
     max_rpm: 5000
     deadzone: 0.08
     smoothing: 0.15
-    stale_timeout: 0.5                     # zero motor if gamepad goes quiet [s]
+    # evdev only reports value changes, so inactivity does not mean the
+    # receiver is disconnected. Actual disconnects still force zero motor.
+    stale_timeout: 0.0
 
     # Motor command units MUST match your autonomous stack. If
     # ackermann_to_vesc publishes ERPM on /commands/motor/speed, use "speed".

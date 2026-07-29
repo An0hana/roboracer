@@ -61,14 +61,16 @@ def generate_launch_description():
         package="tf2_ros",
         executable="static_transform_publisher",
         name="laser_tf",
-        arguments=["0", "0", "0", "0", "0", "0", "base_link", "laser"],
+        # 2D projection: both sensors are 0.25 m ahead of the rear-axle
+        # base_link origin. Height is intentionally ignored.
+        arguments=["0.25", "0", "0", "0", "0", "0", "base_link", "laser"],
     )
 
     imu_tf = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
         name="imu_tf",
-        arguments=["0", "0", "0", "0", "0", "0", "base_link", "gyro_link"],
+        arguments=["0.25", "0", "0", "0", "0", "0", "base_link", "gyro_link"],
     )
 
     return LaunchDescription([

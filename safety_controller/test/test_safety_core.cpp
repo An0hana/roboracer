@@ -69,6 +69,40 @@ TEST(SafetyCore, AebOverridesFreshSelectedCommandAndRetainsSteering)
   EXPECT_NEAR(result.command.steering_angle, 0.10, 1e-12);
 }
 
+TEST(SafetyCore, MovingEmergencyStopClampsRetainedSteering)
+{
+  SafetyConfig config;
+  config.min_command_steering = -0.32;
+  config.max_command_steering = 0.32;
+  SafetyCore core(config);
+  core.updateState(1.0, 0.50, 1.0);
+  core.updateScan(singlePointScan(0.31, 0.0), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_EQ(result.stop_reason, StopReason::kAeb);
+  EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
+  EXPECT_DOUBLE_EQ(result.command.steering_angle, config.max_command_steering);
+  EXPECT_DOUBLE_EQ(core.currentSteeringAngle(), config.max_command_steering);
+}
+
+TEST(SafetyCore, StationaryEmergencyStopCentersAndClearsSteeringLatch)
+{
+  SafetyConfig config;
+  config.min_command_steering = -0.32;
+  config.max_command_steering = 0.32;
+  SafetyCore core(config);
+  core.updateState(0.0, 0.30, 1.0);
+  core.updateScan(singlePointScan(0.31, 0.0), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, -0.10}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_EQ(result.stop_reason, StopReason::kAeb);
+  EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
+  EXPECT_DOUBLE_EQ(result.command.steering_angle, 0.0);
+  EXPECT_DOUBLE_EQ(core.currentSteeringAngle(), 0.0);
+}
+
 TEST(SafetyCore, ObstacleOutsideSweptVehicleDoesNotStop)
 {
   SafetyCore core;

@@ -7,11 +7,16 @@ pose_odom:
 
     tracked_pose_topic: "/tracked_pose"   # geometry_msgs/PoseStamped (Cartographer)
     vesc_topic: "/sensors/core"           # vesc_msgs/VescStateStamped
-    odom_topic: "/car/odom"               # nav_msgs/Odometry (output)
+    odom_topic: "/state_estimation/odom"  # nav_msgs/Odometry (output)
 
     # Frame of /tracked_pose. Cartographer's map_frame is "map".
     odom_frame: "map"
     base_frame: "base_link"
+
+    # Cartographer tracks gyro_link, located 0.25 m ahead of the rear-axle
+    # base_link origin. Convert /tracked_pose back to base_link.
+    tracking_offset_x: 0.25
+    tracking_offset_y: 0.0
 
     # Output rate [Hz]. tracked_pose arrives at ~200 Hz; 50 is plenty for a
     # controller and lighter on the bus. Set 0.0 to publish on every pose.
@@ -42,16 +47,20 @@ pose_odom:
     #   (1 - pose_weight)*|v_rpm| + pose_weight*|v_pose_lp|
     # pose_weight only *softens* an RPM scale error, it cannot cancel it, and
     # it trades in pose noise. Calibrate the gain instead of leaning on this.
-    pose_weight: 0.15
+    # Signed ERPM is calibrated and much less sensitive to scan-matching pose
+    # corrections. Keep pose derivatives out of the speed magnitude on-car.
+    pose_weight: 0.0
 
     # Low-pass factors in [0,1]. Larger = more responsive but noisier.
     pose_speed_alpha: 0.15
     yaw_rate_alpha: 0.15
 
-    # Once the pose-derived speed clears this [m/s], its sign sets direction
-    # (the sensorless ERPM sign is unreliable near zero). Below it, the last
-    # confident direction is held.
+    # Used only as a direction fallback when signed VESC RPM is unavailable.
     direction_threshold: 0.15
+
+    # Suppress stationary Cartographer/RPM jitter. This also clears a stale
+    # reverse direction before the next forward launch.
+    speed_deadband: 0.02
 
     # Ignore pose pairs further apart than this [s].
     max_pose_dt: 0.5

@@ -30,6 +30,11 @@ private:
         std::string odom_frame{"map"};   ///< frame of /tracked_pose
         std::string base_frame{"base_link"};
 
+        // Cartographer's /tracked_pose is the tracking frame (gyro_link).
+        // Position of that frame expressed in base_link [m].
+        double tracking_offset_x{0.0};
+        double tracking_offset_y{0.0};
+
         double publish_rate{50.0};       ///< [Hz] 0 = publish on every pose
 
         // Set to output a direct ERPM->speed calibration log line. Drive a

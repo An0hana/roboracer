@@ -69,6 +69,8 @@ private:
 
 [[nodiscard]] bool stateWithinLimits(
   const State & state, const VehicleConfig & vehicle) noexcept;
+[[nodiscard]] bool clampMeasuredSpeedWithinTolerance(
+  State & state, const VehicleConfig & vehicle, double speed_tolerance) noexcept;
 [[nodiscard]] State propagateState(
   const BicycleModel & model, const State & state, const Control & applied_control,
   double duration, double maximum_step = 0.01);
@@ -244,6 +246,12 @@ struct MppiConfig
   std::size_t repair_iterations{2U};
   double repair_budget_ms{3.0};
   double repair_clearance{0.05};
+  // A stopped vehicle can be a few millimetres inside the configured safety
+  // envelope because the local grid is discrete. Permit only a short,
+  // non-worsening trajectory that restores the full margin.
+  double initial_clearance_tolerance{0.0};
+  std::size_t clearance_recovery_steps{0U};
+  double clearance_recovery_speed_threshold{0.10};
   // CUDA backend allocates this capacity once during warmup. It never grows
   // the device buffer from the control or map callback paths.
   std::size_t cuda_max_map_cells{4U * 1024U * 1024U};
@@ -357,6 +365,20 @@ private:
     const DistanceField * distance_field,
     const std::vector<Obstacle> * obstacles, double time,
     std::size_t * hint = nullptr) const;
+  [[nodiscard]] bool initialStateRecoverable(
+    const State & state, const RaceLine & race_line,
+    const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles, double * initial_margin,
+    std::size_t * hint = nullptr) const;
+  [[nodiscard]] bool stateSafeOrRecovering(
+    const State & state, const RaceLine & race_line,
+    const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles, double time,
+    double initial_margin, std::size_t recovery_step,
+    std::size_t * hint = nullptr) const;
+  [[nodiscard]] double mapMargin(
+    const State & state, const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles, double time) const;
   [[nodiscard]] double footprintClearance(
     const State & state, const DistanceField * distance_field) const;
 

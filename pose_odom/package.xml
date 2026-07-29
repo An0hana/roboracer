@@ -6,7 +6,8 @@
   <description>
     Odometry from Cartographer tracked_pose (position and orientation) fused
     with VESC motor RPM (speed). Motor RPM is the primary speed source; the
-    tracked_pose derivative supplies direction and a slow scale correction.
+    tracked_pose derivative supplies a slow scale correction and direction
+    fallback when signed motor telemetry is unavailable.
   </description>
   <maintainer email="seeed@todo.todo">seeed</maintainer>
   <license>MIT</license>
