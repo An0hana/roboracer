@@ -21,12 +21,14 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument("scan_topic", default_value="/scan"),
-        DeclareLaunchArgument("odom_topic", default_value="/ego_racecar/odom"),
+        DeclareLaunchArgument(
+            "odom_topic", default_value="/state_estimation/odom"
+        ),
         DeclareLaunchArgument(
             "costmap_topic", default_value="/perception/local_costmap"
         ),
         DeclareLaunchArgument(
-            "base_frame", default_value="ego_racecar/base_link"
+            "base_frame", default_value="base_link"
         ),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         Node(

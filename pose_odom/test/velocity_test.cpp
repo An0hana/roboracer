@@ -124,7 +124,7 @@ int main()
                100.0 * (truth * 1.15 - s.mean) / (truth * 1.15 - truth));
     }
 
-    // ---- Case 3: direction from pose when ERPM sign is wrong ------------
+    // ---- Case 3: signed ERPM wins over a false pose-direction reversal ---
     {
         const double truth = -1.5; // reversing
         VelocityEstimator est(p);
@@ -138,15 +138,24 @@ int main()
             x += truth * dt_pose;
             if (t - last_rpm_t >= dt_rpm)
             {
-                // ERPM reported unsigned (magnitude only) -- a real failure
-                // mode of sensorless VESC at low speed.
-                est.updateRpm(std::abs(erpmForSpeed(truth, p)));
+                est.updateRpm(erpmForSpeed(truth, p));
                 last_rpm_t = t;
             }
             est.updatePose(x, y, yaw, t);
             if (i > 400) { total++; if (sgn(est.speed()) == sgn(truth)) correct_sign++; }
         }
-        printf("\nreverse with unsigned ERPM: correct direction %d%% of the time\n",
+        // Inject a forward localization jump large enough to flip the
+        // pose-derived direction. Signed motor telemetry must remain primary.
+        est.updatePose(x + 2.0, y, yaw, t + dt_pose);
+        if (sgn(est.speed()) != sgn(truth))
+        {
+            std::fprintf(
+                stderr,
+                "signed ERPM must override pose-direction error, got %.6f\n",
+                est.speed());
+            return 1;
+        }
+        printf("\nreverse with misleading pose derivative: correct direction %d%% of the time\n",
                100 * correct_sign / total);
         printf("  final fused speed %.3f (truth %.1f)\n", est.speed(), truth);
     }
@@ -176,6 +185,23 @@ int main()
         const Summary s = summarize(out, omega);
         printf("\nsteady turn omega %.2f rad/s: yaw-rate mean %.3f  std %.4f\n",
                omega, s.mean, s.stddev);
+    }
+
+    // ---- Case 5: stationary RPM rejects localization-derivative jitter ---
+    {
+        VelocityEstimator est(p);
+        est.updateRpm(0.0);
+        est.updatePose(0.0, 0.0, 0.0, 0.00);
+        est.updatePose(-0.02, 0.0, 0.0, 0.01);
+        if (est.speed() != 0.0)
+        {
+            std::fprintf(
+                stderr,
+                "stationary RPM must suppress localization speed, got %.6f\n",
+                est.speed());
+            return 1;
+        }
+        printf("\nstationary RPM suppresses localization jitter: PASS\n");
     }
 
     return 0;

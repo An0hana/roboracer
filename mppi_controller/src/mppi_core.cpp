@@ -19,6 +19,7 @@ namespace
 constexpr double kEpsilon = 1.0e-9;
 constexpr double kMaximumRaceLineSegment = 0.25;
 constexpr double kRaceLineProgressTolerance = 0.03;
+constexpr double kClearanceRecoverySlack = 0.002;
 
 bool finite(double value)
 {
@@ -39,6 +40,24 @@ double stableSoftplus(double value)
     return std::exp(value);
   }
   return std::log1p(std::exp(value));
+}
+
+double clearanceRecoveryRequiredMargin(
+  double initial_margin, std::size_t step, std::size_t recovery_steps)
+{
+  if (recovery_steps == 0U || step >= recovery_steps) {
+    return 0.0;
+  }
+  // Hold a two-millimetre numerical allowance for the first few grid updates,
+  // then ramp the required margin back to the full hard envelope.
+  const std::size_t grace_steps = std::min<std::size_t>(4U, recovery_steps / 3U);
+  if (step < grace_steps) {
+    return initial_margin - kClearanceRecoverySlack;
+  }
+  const std::size_t ramp_steps = recovery_steps - grace_steps;
+  const double progress = static_cast<double>(step + 1U - grace_steps) /
+    static_cast<double>(ramp_steps);
+  return (initial_margin - kClearanceRecoverySlack) * (1.0 - progress);
 }
 
 std::string trim(const std::string & text)
@@ -294,6 +313,20 @@ bool stateWithinLimits(const State & state, const VehicleConfig & vehicle) noexc
          state.speed <= vehicle.max_speed + kEpsilon &&
          state.steering >= vehicle.min_steering - kEpsilon &&
          state.steering <= vehicle.max_steering + kEpsilon;
+}
+
+bool clampMeasuredSpeedWithinTolerance(
+  State & state, const VehicleConfig & vehicle, double speed_tolerance) noexcept
+{
+  if (!finite(speed_tolerance) || speed_tolerance < 0.0 ||
+    !finite(state.speed) ||
+    state.speed < vehicle.min_speed - speed_tolerance ||
+    state.speed > vehicle.max_speed + speed_tolerance)
+  {
+    return false;
+  }
+  state.speed = std::clamp(state.speed, vehicle.min_speed, vehicle.max_speed);
+  return stateWithinLimits(state, vehicle);
 }
 
 State propagateState(
@@ -806,6 +839,12 @@ void CpuMppiBackend::configure(const MppiConfig & config, const VehicleConfig & 
     config.maximum_heading_error >= kPi * 0.5 ||
     !finite(config.reverse_progress_tolerance) || config.reverse_progress_tolerance < 0.0 ||
     !finite(config.repair_clearance) || config.repair_clearance < 0.0 ||
+    !finite(config.initial_clearance_tolerance) ||
+    config.initial_clearance_tolerance < 0.0 ||
+    config.initial_clearance_tolerance > vehicle.safety_margin ||
+    config.clearance_recovery_steps > config.horizon_steps ||
+    !finite(config.clearance_recovery_speed_threshold) ||
+    config.clearance_recovery_speed_threshold < 0.0 ||
     !std::all_of(
       weights.begin(), weights.end(),
       [](double value) {return finite(value) && value >= 0.0;}))
@@ -860,10 +899,12 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     state, hint, config_.nearest_search_radius);
   double previous_progress = initial_projection.progress;
   double cumulative_progress = 0.0;
-  double previous_map_h = std::min(
-    footprintClearance(state, distance_field),
-    obstacleClearance(state, vehicle_, obstacles, 0.0)) -
-    vehicle_.safety_margin - config_.repair_clearance;
+  const double initial_map_margin = mapMargin(
+    state, distance_field, obstacles, 0.0);
+  double recovery_initial_margin = 0.0;
+  const bool clearance_recovery = initialStateRecoverable(
+    state, race_line, distance_field, obstacles, &recovery_initial_margin);
+  double previous_map_h = initial_map_margin - config_.repair_clearance;
   Control previous_control{};
   if (states != nullptr) {
     states->clear();
@@ -882,9 +923,7 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     const double track_h = signedTrackMargin(state, projection, reference, vehicle_);
     // Obstacles share the map's collision/CBF pipeline through a combined
     // margin, so both worlds enforce identical safety semantics.
-    const double map_margin = std::min(
-      footprintClearance(state, distance_field),
-      obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
+    const double map_margin = mapMargin(state, distance_field, obstacles, time);
     // vehicle_.safety_margin is the hard collision envelope.
     // repair_clearance is an additional preferred buffer for CBF/boundary
     // costs. Keeping it soft allows a physically safe vehicle that entered
@@ -933,7 +972,12 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
     }
     cost.cbf += config_.weights.cbf * adaptive.safety_weight_scale *
       (square(map_cbf) + square(map_soft_barrier));
-    if (map_margin < 0.0) {
+    const bool recoverable_clearance = clearance_recovery &&
+      step < config_.clearance_recovery_steps &&
+      map_margin >= -vehicle_.safety_margin &&
+      map_margin >= clearanceRecoveryRequiredMargin(
+      recovery_initial_margin, step, config_.clearance_recovery_steps);
+    if (map_margin < 0.0 && !recoverable_clearance) {
       cost.collision += config_.weights.collision;
     }
     if (std::abs(projection.heading_error) > config_.maximum_heading_error ||
@@ -1013,12 +1057,76 @@ bool CpuMppiBackend::stateSafe(
   if (hint != nullptr) {
     *hint = projection.index;
   }
-  const double map_margin = std::min(
-    footprintClearance(state, distance_field),
-    obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
+  const double map_margin = mapMargin(state, distance_field, obstacles, time);
   return finite(state.x) && finite(state.y) && finite(state.yaw) && finite(state.speed) &&
          finite(state.steering) && map_margin >= 0.0 &&
          std::abs(projection.heading_error) <= config_.maximum_heading_error;
+}
+
+double CpuMppiBackend::mapMargin(
+  const State & state, const DistanceField * distance_field,
+  const std::vector<Obstacle> * obstacles, double time) const
+{
+  return std::min(
+    footprintClearance(state, distance_field),
+    obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
+}
+
+bool CpuMppiBackend::initialStateRecoverable(
+  const State & state, const RaceLine & race_line,
+  const DistanceField * distance_field,
+  const std::vector<Obstacle> * obstacles, double * initial_margin,
+  std::size_t * hint) const
+{
+  const std::optional<std::size_t> optional_hint = hint == nullptr ?
+    std::nullopt : std::optional<std::size_t>(*hint);
+  const TrackProjection projection = race_line.project(
+    state, optional_hint, config_.nearest_search_radius);
+  if (hint != nullptr) {
+    *hint = projection.index;
+  }
+  const double margin = mapMargin(state, distance_field, obstacles, 0.0);
+  if (initial_margin != nullptr) {
+    *initial_margin = margin;
+  }
+  return config_.clearance_recovery_steps > 0U &&
+         config_.initial_clearance_tolerance > 0.0 &&
+         finite(state.x) && finite(state.y) && finite(state.yaw) &&
+         finite(state.speed) && finite(state.steering) &&
+         stateWithinLimits(state, vehicle_) &&
+         state.speed <= config_.clearance_recovery_speed_threshold &&
+         margin < 0.0 && margin >= -config_.initial_clearance_tolerance &&
+         std::abs(projection.heading_error) <= config_.maximum_heading_error;
+}
+
+bool CpuMppiBackend::stateSafeOrRecovering(
+  const State & state, const RaceLine & race_line,
+  const DistanceField * distance_field,
+  const std::vector<Obstacle> * obstacles, double time,
+  double initial_margin, std::size_t recovery_step,
+  std::size_t * hint) const
+{
+  const std::optional<std::size_t> optional_hint = hint == nullptr ?
+    std::nullopt : std::optional<std::size_t>(*hint);
+  const TrackProjection projection = race_line.project(
+    state, optional_hint, config_.nearest_search_radius);
+  if (hint != nullptr) {
+    *hint = projection.index;
+  }
+  const double margin = mapMargin(state, distance_field, obstacles, time);
+  if (!finite(state.x) || !finite(state.y) || !finite(state.yaw) ||
+    !finite(state.speed) || !finite(state.steering) ||
+    std::abs(projection.heading_error) > config_.maximum_heading_error)
+  {
+    return false;
+  }
+  if (margin >= 0.0) {
+    return true;
+  }
+  return recovery_step < config_.clearance_recovery_steps &&
+         margin >= -vehicle_.safety_margin &&
+         margin >= clearanceRecoveryRequiredMargin(
+    initial_margin, recovery_step, config_.clearance_recovery_steps);
 }
 
 TrajectoryMetrics CpuMppiBackend::trajectoryMetrics(
@@ -1094,7 +1202,13 @@ bool CpuMppiBackend::repairControls(
   std::chrono::steady_clock::time_point deadline,
   const std::vector<Obstacle> * obstacles) const
 {
-  if (controls.size() < config_.repair_steps || !stateSafe(
+  if (controls.size() < config_.repair_steps) {
+    return false;
+  }
+  double recovery_initial_margin = 0.0;
+  const bool clearance_recovery = initialStateRecoverable(
+    initial_state, race_line, distance_field, obstacles, &recovery_initial_margin);
+  if (!clearance_recovery && !stateSafe(
       initial_state, race_line, distance_field, obstacles, 0.0))
   {
     return false;
@@ -1110,7 +1224,13 @@ bool CpuMppiBackend::repairControls(
       controls[step] = model_.clampControl(controls[step]);
       const State candidate = model_.step(state, controls[step], config_.dt);
       const double candidate_time = static_cast<double>(step + 1U) * config_.dt;
-      if (!stateSafe(candidate, race_line, distance_field, obstacles, candidate_time, &hint)) {
+      const bool candidate_safe = clearance_recovery ?
+        stateSafeOrRecovering(
+        candidate, race_line, distance_field, obstacles, candidate_time,
+        recovery_initial_margin, step, &hint) :
+        stateSafe(
+        candidate, race_line, distance_field, obstacles, candidate_time, &hint);
+      if (!candidate_safe) {
         all_safe = false;
         const TrackProjection projection = race_line.project(
           state, hint, config_.nearest_search_radius);
@@ -1146,7 +1266,12 @@ bool CpuMppiBackend::repairControls(
     controls[step] = model_.clampControl(controls[step]);
     state = model_.step(state, controls[step], config_.dt);
     const double time = static_cast<double>(step + 1U) * config_.dt;
-    if (!stateSafe(state, race_line, distance_field, obstacles, time, &hint)) {
+    const bool state_safe = clearance_recovery ?
+      stateSafeOrRecovering(
+      state, race_line, distance_field, obstacles, time,
+      recovery_initial_margin, step, &hint) :
+      stateSafe(state, race_line, distance_field, obstacles, time, &hint);
+    if (!state_safe) {
       return false;
     }
   }
@@ -1174,9 +1299,13 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
     result.reason = "initial_state_out_of_bounds";
     return result;
   }
+  double recovery_initial_margin = 0.0;
   if (!stateSafe(
       request.initial_state, *request.race_line, request.distance_field,
-      request.obstacles, 0.0))
+      request.obstacles, 0.0) &&
+    !initialStateRecoverable(
+      request.initial_state, *request.race_line, request.distance_field,
+      request.obstacles, &recovery_initial_margin))
   {
     result.reason = "initial_state_unsafe";
     return result;

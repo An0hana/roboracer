@@ -82,33 +82,42 @@ class F710Gamepad:
             raise RuntimeError("evdev is required on Jetson/Linux: pip install evdev") from exc
 
         device = InputDevice(self.device)
-        self._axis_ranges = {
-            code: (info.min, info.max)
-            for code, info in device.capabilities(absinfo=True).get(ecodes.EV_ABS, [])
-        }
-        self._set_snapshot(connected=True)
+        try:
+            self._axis_ranges = {
+                code: (info.min, info.max)
+                for code, info in device.capabilities(absinfo=True).get(ecodes.EV_ABS, [])
+            }
+            self._set_snapshot(connected=True)
 
-        for event in device.read_loop():
-            if self._stop_event.is_set():
-                break
-            if event.type == ecodes.EV_ABS:
-                if event.code == ecodes.ABS_Y:
-                    # Keep the raw stick direction: up is negative, down is positive.
-                    self._set_snapshot(throttle=self._axis_unit(event.code, event.value))
-                elif event.code == ecodes.ABS_RY:
-                    # Keep the raw stick direction: up is negative, down is positive.
-                    self._set_snapshot(right_y=self._axis_unit(event.code, event.value))
-                elif event.code == ecodes.ABS_RX:
-                    self._set_snapshot(steering=self._axis_unit(event.code, event.value))
-                elif event.code == ecodes.ABS_Z:
-                    self._set_snapshot(brake=self._axis_unit(event.code, event.value, False))
-            elif event.type == ecodes.EV_KEY:
-                if event.code == ecodes.BTN_SOUTH:
-                    self._set_snapshot(forward_pressed=bool(event.value))
-                elif event.code == ecodes.BTN_EAST:
-                    self._set_snapshot(reverse_pressed=bool(event.value))
-                elif event.code == 308:
-                    # X on this F710 reports raw code 308. Matched numerically
-                    # because the ecodes.BTN_WEST/BTN_NORTH constants disagree
-                    # with the device's labels on some evdev builds.
-                    self._set_snapshot(takeover_pressed=bool(event.value))
+            for event in device.read_loop():
+                if self._stop_event.is_set():
+                    break
+                if event.type == ecodes.EV_ABS:
+                    if event.code == ecodes.ABS_Y:
+                        # Keep the raw stick direction: up is negative, down is positive.
+                        self._set_snapshot(throttle=self._axis_unit(event.code, event.value))
+                    elif event.code == ecodes.ABS_RY:
+                        # Keep the raw stick direction: up is negative, down is positive.
+                        self._set_snapshot(right_y=self._axis_unit(event.code, event.value))
+                    elif event.code == ecodes.ABS_RX:
+                        self._set_snapshot(steering=self._axis_unit(event.code, event.value))
+                    elif event.code == ecodes.ABS_Z:
+                        self._set_snapshot(
+                            brake=self._axis_unit(event.code, event.value, False))
+                elif event.type == ecodes.EV_KEY:
+                    if event.code == ecodes.BTN_SOUTH:
+                        self._set_snapshot(forward_pressed=bool(event.value))
+                    elif event.code == ecodes.BTN_EAST:
+                        self._set_snapshot(reverse_pressed=bool(event.value))
+                    elif event.code == 307:
+                        # This F710 reports the physical X button as raw code 307
+                        # (A=304, B=305, X=307, Y=308).
+                        self._set_snapshot(takeover_pressed=bool(event.value))
+        except OSError:
+            # Unplugging the receiver terminates the event stream. Mark the
+            # controller disconnected so the control loop immediately emits
+            # zero motor command.
+            self._set_snapshot(connected=False)
+        finally:
+            device.close()
+            self._set_snapshot(connected=False)

@@ -52,6 +52,7 @@ struct SafetyConfig
   double scan_timeout{0.150};
   double command_timeout{0.100};
   double switch_speed_threshold{0.200};
+  double stop_steering_center_speed{0.050};
 
   // Independent command envelope. A controller output outside these bounds
   // is a fault, not a value for the hardware driver to clamp silently.

@@ -26,6 +26,8 @@ def generate_launch_description():
     costmap_topic = LaunchConfiguration("costmap_topic")
     command_topic = LaunchConfiguration("command_topic")
     max_speed = LaunchConfiguration("max_speed")
+    min_steering = LaunchConfiguration("min_steering")
+    max_steering = LaunchConfiguration("max_steering")
     speed_weight = LaunchConfiguration("speed_weight")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
@@ -45,7 +47,13 @@ def generate_launch_description():
                 "odom_topic": odom_topic,
                 "costmap_topic": costmap_topic,
                 "command_topic": command_topic,
-                "vehicle.max_speed": max_speed,
+                "vehicle.max_speed": ParameterValue(max_speed, value_type=float),
+                "vehicle.min_steering": ParameterValue(
+                    min_steering, value_type=float
+                ),
+                "vehicle.max_steering": ParameterValue(
+                    max_steering, value_type=float
+                ),
                 "weights.speed": ParameterValue(speed_weight, value_type=float),
                 "use_sim_time": use_sim_time,
                 "require_race_state": require_race_state,
@@ -104,12 +112,16 @@ def generate_launch_description():
             description="Absolute path to strict race-line CSV",
         ),
         DeclareLaunchArgument("backend", default_value="cuda"),
-        DeclareLaunchArgument("odom_topic", default_value="/ego_racecar/odom"),
+        DeclareLaunchArgument(
+            "odom_topic", default_value="/state_estimation/odom"
+        ),
         DeclareLaunchArgument(
             "costmap_topic", default_value="/perception/local_costmap"
         ),
         DeclareLaunchArgument("command_topic", default_value="/control/mppi_cmd"),
         DeclareLaunchArgument("max_speed", default_value="2.0"),
+        DeclareLaunchArgument("min_steering", default_value="-0.32"),
+        DeclareLaunchArgument("max_steering", default_value="0.32"),
         DeclareLaunchArgument("speed_weight", default_value="50.0"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("autostart", default_value="true"),

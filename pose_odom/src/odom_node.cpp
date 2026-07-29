@@ -52,6 +52,10 @@ void OdomNode::loadParameters()
 
     params_.odom_frame = declare_parameter("odom_frame", params_.odom_frame);
     params_.base_frame = declare_parameter("base_frame", params_.base_frame);
+    params_.tracking_offset_x =
+        declare_parameter("tracking_offset_x", params_.tracking_offset_x);
+    params_.tracking_offset_y =
+        declare_parameter("tracking_offset_y", params_.tracking_offset_y);
 
     params_.publish_rate =
         declare_parameter("publish_rate", params_.publish_rate);
@@ -80,6 +84,8 @@ void OdomNode::loadParameters()
         declare_parameter("yaw_rate_alpha", vp.yaw_rate_alpha);
     vp.direction_threshold =
         declare_parameter("direction_threshold", vp.direction_threshold);
+    vp.speed_deadband =
+        declare_parameter("speed_deadband", vp.speed_deadband);
     vp.max_pose_dt = declare_parameter("max_pose_dt", vp.max_pose_dt);
 
     estimator_.setParams(vp);
@@ -97,11 +103,17 @@ void OdomNode::poseCallback(
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    x_  = msg->pose.position.x;
-    y_  = msg->pose.position.y;
     qz_ = msg->pose.orientation.z;
     qw_ = msg->pose.orientation.w;
     yaw_ = yawFromQuat(qz_, qw_);
+    // /tracked_pose is the pose of Cartographer's tracking_frame. Convert it
+    // to the rear-axle base_link origin before publishing controller state.
+    x_ = msg->pose.position.x -
+         std::cos(yaw_) * params_.tracking_offset_x +
+         std::sin(yaw_) * params_.tracking_offset_y;
+    y_ = msg->pose.position.y -
+         std::sin(yaw_) * params_.tracking_offset_x -
+         std::cos(yaw_) * params_.tracking_offset_y;
     have_pose_ = true;
 
     const rclcpp::Time stamp(msg->header.stamp);
@@ -144,7 +156,7 @@ void OdomNode::publish(const rclcpp::Time& stamp)
     odom.header.frame_id = params_.odom_frame;
     odom.child_frame_id = params_.base_frame;
 
-    // Pose straight from tracked_pose.
+    // Pose converted from tracking_frame to base_link.
     odom.pose.pose.position.x = x_;
     odom.pose.pose.position.y = y_;
     odom.pose.pose.position.z = 0.0;

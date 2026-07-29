@@ -1,10 +1,10 @@
 local_costmap:
   ros__parameters:
     scan_topic: /scan
-    odom_topic: /ego_racecar/odom
+    odom_topic: /state_estimation/odom
     costmap_topic: /perception/local_costmap
     map_frame: map
-    base_frame: ego_racecar/base_link
+    base_frame: base_link
     # A map-aligned square safely contains the complete 9.6 m prediction
     # arc produced by the 2.4 s MPPI horizon at 4 m/s.
     size_x: 22.0

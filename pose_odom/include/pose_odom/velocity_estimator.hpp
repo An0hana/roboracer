@@ -35,10 +35,13 @@ struct VelocityParams
     double pose_speed_alpha{0.15};
     double yaw_rate_alpha{0.15};
 
-    // Direction handling. The sensorless ERPM sign is unreliable near zero,
-    // so once the pose-derived speed clears this threshold [m/s] it dictates
-    // the sign; below it the last confident direction is held.
+    // Direction fallback used when signed motor telemetry is unavailable.
     double direction_threshold{0.15};
+
+    // Fused speeds below this magnitude are reported as zero. When RPM is
+    // also inside this band, forget the previous direction so a new movement
+    // can take its sign from RPM instead of inheriting stale reverse motion.
+    double speed_deadband{0.02};
 
     // Ignore pose samples further apart than this [s] (e.g. after a stall).
     double max_pose_dt{0.5};
@@ -68,6 +71,10 @@ public:
     void updateRpm(double erpm)
     {
         v_rpm_ = erpm * params_.erpm_to_speed_gain;
+        if (std::abs(v_rpm_) <= params_.speed_deadband)
+        {
+            direction_ = 0;
+        }
         have_rpm_ = true;
     }
 
@@ -104,12 +111,27 @@ public:
     /// Fused signed ground speed [m/s].
     double speed() const
     {
+        // Motor telemetry is the primary speed source. If it explicitly says
+        // the wheels are stationary, do not let differentiated localization
+        // jitter manufacture forward or reverse motion.
+        if (have_rpm_ && std::abs(v_rpm_) <= params_.speed_deadband)
+        {
+            return 0.0;
+        }
+
         const double mag =
             (1.0 - params_.pose_weight) * std::abs(v_rpm_) +
             params_.pose_weight * std::abs(v_pose_lp_);
+        if (mag <= params_.speed_deadband)
+        {
+            return 0.0;
+        }
 
-        int dir = direction_;
-        if (dir == 0) { dir = (v_rpm_ != 0.0) ? sgn(v_rpm_) : 1; }
+        // This vehicle's VESC reports signed ERPM reliably while moving.
+        // Localization derivatives can briefly flip during scan corrections,
+        // so they must not override the measured wheel direction.
+        int dir = have_rpm_ ? sgn(v_rpm_) : direction_;
+        if (dir == 0) { dir = (direction_ != 0) ? direction_ : 1; }
         return dir * mag;
     }
 

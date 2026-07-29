@@ -265,6 +265,55 @@ TEST(Cost, TreatsRepairClearanceAsSoftBufferBeyondHardSafetyMargin)
       state, recovery_controls, track, &field, deadline));
 }
 
+TEST(Cost, AllowsOnlyLowSpeedClearanceRecoveryThatRestoresHardMargin)
+{
+  const RaceLine track = makeCircle(false, 2.0);
+  MppiConfig config = fastConfig();
+  config.horizon_steps = 24U;
+  config.initial_clearance_tolerance = 0.015;
+  config.clearance_recovery_steps = 12U;
+  config.clearance_recovery_speed_threshold = 0.10;
+  const VehicleConfig vehicle;
+  CpuMppiBackend backend(config, vehicle);
+
+  const double vehicle_segment_length = vehicle.length /
+    std::ceil(vehicle.length / (vehicle.width * 0.5));
+  const double vehicle_cover_radius = std::hypot(
+    vehicle.width * 0.5, vehicle_segment_length * 0.5);
+  Obstacle obstacle;
+  obstacle.half_width = 0.02;
+  obstacle.x =
+    5.0 + vehicle_cover_radius + obstacle.half_width +
+    vehicle.safety_margin - 0.010;
+  obstacle.y = -vehicle.rear_overhang + vehicle_segment_length * 0.5;
+  const std::vector<Obstacle> obstacles{obstacle};
+  const State initial{5.0, 0.0, kPi * 0.5, 0.0, 0.0};
+  EXPECT_NEAR(
+    obstacleClearance(initial, vehicle, &obstacles, 0.0) -
+    vehicle.safety_margin, -0.010, 1.0e-9);
+
+  // Remaining stationary inside the envelope is not accepted.
+  const std::vector<Control> stationary(config.horizon_steps, Control{});
+  const CostBreakdown stationary_cost = backend.evaluateTrajectory(
+    initial, stationary, track, nullptr, nullptr, &obstacles);
+  EXPECT_GT(stationary_cost.collision, 0.0);
+
+  // A bounded launch that monotonically separates from the obstacle and
+  // restores the full margin within the configured window remains feasible.
+  const std::vector<Control> departing(
+    config.horizon_steps, Control{0.0, vehicle.max_acceleration});
+  const CostBreakdown departing_cost = backend.evaluateTrajectory(
+    initial, departing, track, nullptr, nullptr, &obstacles);
+  EXPECT_EQ(departing_cost.collision, 0.0);
+
+  // The same envelope violation is never relaxed while the vehicle is moving.
+  State moving = initial;
+  moving.speed = config.clearance_recovery_speed_threshold + 0.01;
+  const CostBreakdown moving_cost = backend.evaluateTrajectory(
+    moving, departing, track, nullptr, nullptr, &obstacles);
+  EXPECT_GT(moving_cost.collision, 0.0);
+}
+
 TEST(Cost, ClampsRaceLineSpeedToConfiguredVehicleMaximum)
 {
   const RaceLine track = makeCircle();
@@ -459,6 +508,25 @@ TEST(MppiBackend, RejectsOutOfBoundsMeasuredInitialStateInsteadOfClampingIt)
   const MppiResult excessive_steering = backend.compute(request);
   EXPECT_FALSE(excessive_steering.valid);
   EXPECT_EQ(excessive_steering.reason, "initial_state_out_of_bounds");
+}
+
+TEST(BicycleModel, ClampsOnlySmallMeasuredSpeedBoundaryOvershoot)
+{
+  VehicleConfig vehicle;
+  State state{1.0, 2.0, 0.2, vehicle.max_speed + 0.24, 0.1};
+  EXPECT_TRUE(clampMeasuredSpeedWithinTolerance(state, vehicle, 0.25));
+  EXPECT_DOUBLE_EQ(state.speed, vehicle.max_speed);
+
+  state.speed = vehicle.min_speed - 0.10;
+  EXPECT_TRUE(clampMeasuredSpeedWithinTolerance(state, vehicle, 0.25));
+  EXPECT_DOUBLE_EQ(state.speed, vehicle.min_speed);
+
+  state.speed = vehicle.max_speed + 0.26;
+  EXPECT_FALSE(clampMeasuredSpeedWithinTolerance(state, vehicle, 0.25));
+
+  state.speed = vehicle.max_speed;
+  state.steering = vehicle.max_steering + 0.01;
+  EXPECT_FALSE(clampMeasuredSpeedWithinTolerance(state, vehicle, 0.25));
 }
 
 TEST(MppiBackend, RejectsInvalidExplorationScale)

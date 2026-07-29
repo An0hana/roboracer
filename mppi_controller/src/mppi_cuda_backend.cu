@@ -40,6 +40,7 @@ constexpr int kCudaTimesteps = 48;
 constexpr int kLocalWaypointCapacity = 256;
 constexpr int kReferencePointsBehind = 24;
 constexpr float kMinimumBarrierScale = 0.02F;
+constexpr float kClearanceRecoverySlack = 0.002F;
 
 __host__ __device__ inline float clampFloat(float value, float lower, float upper)
 {
@@ -54,6 +55,22 @@ __host__ __device__ inline float squareFloat(float value)
 __host__ __device__ inline float normalizeAngleFloat(float angle)
 {
   return atan2f(sinf(angle), cosf(angle));
+}
+
+__host__ __device__ inline float clearanceRecoveryRequiredMarginFloat(
+  float initial_margin, int step, int recovery_steps)
+{
+  if (recovery_steps <= 0 || step >= recovery_steps) {
+    return 0.0F;
+  }
+  const int grace_steps = recovery_steps / 3 < 4 ? recovery_steps / 3 : 4;
+  if (step < grace_steps) {
+    return initial_margin - kClearanceRecoverySlack;
+  }
+  const int ramp_steps = recovery_steps - grace_steps;
+  const float progress = static_cast<float>(step + 1 - grace_steps) /
+    static_cast<float>(ramp_steps);
+  return (initial_margin - kClearanceRecoverySlack) * (1.0F - progress);
 }
 
 double maximumReachableDistance(
@@ -353,6 +370,9 @@ struct F1TenthCostParams : public CostParams<2>
   float front_extent{0.428F};
   float half_width{0.160F};
   float safety_margin{0.05F};
+  float initial_map_margin{0.0F};
+  int clearance_recovery_allowed{0};
+  int clearance_recovery_steps{0};
   float max_lateral_acceleration{6.0F};
   float maximum_heading_error{1.20F};
   float minimum_preview_distance{4.0F};
@@ -672,7 +692,14 @@ private:
     // scan-derived local distance field can declare a collision.
     cost += this->params_.weight_barrier *
       this->params_.safety_weight_scale * squareFloat(map_soft_barrier);
-    if (map_margin < 0.0F) {
+    const bool recoverable_clearance =
+      this->params_.clearance_recovery_allowed != 0 &&
+      timestep < this->params_.clearance_recovery_steps &&
+      map_margin >= -this->params_.safety_margin &&
+      map_margin >= clearanceRecoveryRequiredMarginFloat(
+      this->params_.initial_map_margin, timestep,
+      this->params_.clearance_recovery_steps);
+    if (map_margin < 0.0F && !recoverable_clearance) {
       cost += this->params_.weight_collision;
       if (crash_status != nullptr) {
         crash_status[0] = 1;
@@ -872,7 +899,8 @@ public:
       const State warm_state{
         waypoint.x, waypoint.y, waypoint.yaw,
         std::min(0.1, waypoint.reference_speed), 0.0};
-      prepareCost(warm_state, race_line);
+      prepareCost(
+        warm_state, race_line, std::numeric_limits<double>::infinity());
       if (!initializeController()) {
         return false;
       }
@@ -992,15 +1020,15 @@ public:
     }
 
     try {
-      prepareCost(
-        request.initial_state, *request.race_line, request.obstacles,
-        request.behavior);
       // Preserve the measured-state clearance even when no candidate can be
       // repaired. This makes an actual safety-margin violation distinguishable
       // from a sampler failure in /diagnostics.
       result.metrics = validator_.trajectoryMetrics(
         request.initial_state, {}, *request.race_line,
         request.distance_field, request.obstacles);
+      prepareCost(
+        request.initial_state, *request.race_line, result.metrics.minimum_clearance,
+        request.obstacles, request.behavior);
       if (launch_seed_pending_) {
         controller_->updateImportanceSampler(
           toCudaControls(racelineTrackingControls(request)));
@@ -1324,7 +1352,7 @@ private:
   }
 
   void prepareCost(
-    const State & state, const RaceLine & race_line,
+    const State & state, const RaceLine & race_line, double initial_map_margin,
     const std::vector<Obstacle> * obstacles = nullptr,
     const MppiBehavior & behavior = MppiBehavior{})
   {
@@ -1398,6 +1426,15 @@ private:
       vehicle_.length - vehicle_.rear_overhang);
     cost_params_.half_width = static_cast<float>(vehicle_.width * 0.5);
     cost_params_.safety_margin = static_cast<float>(vehicle_.safety_margin);
+    cost_params_.initial_map_margin = static_cast<float>(initial_map_margin);
+    cost_params_.clearance_recovery_allowed =
+      config_.clearance_recovery_steps > 0U &&
+      config_.initial_clearance_tolerance > 0.0 &&
+      state.speed <= config_.clearance_recovery_speed_threshold &&
+      initial_map_margin < 0.0 &&
+      initial_map_margin >= -config_.initial_clearance_tolerance ? 1 : 0;
+    cost_params_.clearance_recovery_steps =
+      static_cast<int>(config_.clearance_recovery_steps);
     const double target_segment_length = std::max(0.02, vehicle_.width * 0.5);
     const std::size_t segment_count = std::max<std::size_t>(
       1U, static_cast<std::size_t>(std::ceil(vehicle_.length / target_segment_length)));

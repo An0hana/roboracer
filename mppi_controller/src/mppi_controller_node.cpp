@@ -116,6 +116,7 @@ private:
     declare_parameter<double>("localization_position_jump_threshold", 0.50);
     declare_parameter<double>("localization_yaw_jump_threshold", 0.70);
     declare_parameter<double>("localization_jump_hold_time", 0.50);
+    declare_parameter<double>("measured_speed_tolerance", 0.15);
     declare_parameter<bool>("require_costmap", true);
     declare_parameter<int>("occupied_threshold", 50);
     declare_parameter<bool>("unknown_is_occupied", false);
@@ -154,6 +155,9 @@ private:
     declare_parameter<int>("mppi.repair_iterations", 2);
     declare_parameter<double>("mppi.repair_budget_ms", 3.0);
     declare_parameter<double>("mppi.repair_clearance", 0.05);
+    declare_parameter<double>("mppi.initial_clearance_tolerance", 0.0);
+    declare_parameter<int>("mppi.clearance_recovery_steps", 0);
+    declare_parameter<double>("mppi.clearance_recovery_speed_threshold", 0.10);
     declare_parameter<int>("cuda.max_map_cells", 4 * 1024 * 1024);
 
     declare_parameter<double>("vehicle.wheelbase", 0.324);
@@ -229,9 +233,12 @@ private:
       const int search_radius = parameter<int>("mppi.nearest_search_radius");
       const int repair_steps = parameter<int>("mppi.repair_steps");
       const int repair_iterations = parameter<int>("mppi.repair_iterations");
+      const int clearance_recovery_steps =
+        parameter<int>("mppi.clearance_recovery_steps");
       const int cuda_max_map_cells = parameter<int>("cuda.max_map_cells");
       if (rollouts < 2 || horizon < 1 || seed < 0 || search_radius < 1 ||
-        repair_steps < 0 || repair_iterations < 1 || cuda_max_map_cells < 1)
+        repair_steps < 0 || repair_iterations < 1 || clearance_recovery_steps < 0 ||
+        clearance_recovery_steps > horizon || cuda_max_map_cells < 1)
       {
         error = "MPPI integer parameters are out of range";
         return false;
@@ -242,6 +249,8 @@ private:
       mppi_.nearest_search_radius = static_cast<std::size_t>(search_radius);
       mppi_.repair_steps = static_cast<std::size_t>(repair_steps);
       mppi_.repair_iterations = static_cast<std::size_t>(repair_iterations);
+      mppi_.clearance_recovery_steps =
+        static_cast<std::size_t>(clearance_recovery_steps);
       mppi_.cuda_max_map_cells = static_cast<std::size_t>(cuda_max_map_cells);
       mppi_.dt = parameter<double>("mppi.dt");
       mppi_.lambda = parameter<double>("mppi.lambda");
@@ -258,6 +267,10 @@ private:
         parameter<double>("mppi.reverse_progress_tolerance");
       mppi_.repair_budget_ms = parameter<double>("mppi.repair_budget_ms");
       mppi_.repair_clearance = parameter<double>("mppi.repair_clearance");
+      mppi_.initial_clearance_tolerance =
+        parameter<double>("mppi.initial_clearance_tolerance");
+      mppi_.clearance_recovery_speed_threshold =
+        parameter<double>("mppi.clearance_recovery_speed_threshold");
       mppi_.weights.lateral = parameter<double>("weights.lateral");
       mppi_.weights.heading = parameter<double>("weights.heading");
       mppi_.weights.lag = parameter<double>("weights.lag");
@@ -311,6 +324,7 @@ private:
         parameter<double>("localization_position_jump_threshold");
       localization_yaw_jump_threshold_ = parameter<double>("localization_yaw_jump_threshold");
       localization_jump_hold_time_ = parameter<double>("localization_jump_hold_time");
+      measured_speed_tolerance_ = parameter<double>("measured_speed_tolerance");
       require_costmap_ = parameter<bool>("require_costmap");
       occupied_threshold_ = parameter<int>("occupied_threshold");
       unknown_is_occupied_ = parameter<bool>("unknown_is_occupied");
@@ -346,6 +360,7 @@ private:
         !positive(output_timeout_) || !positive(tf_timeout_) || !positive(max_solve_time_ms_) ||
         !positive(localization_position_jump_threshold_) ||
         !positive(localization_yaw_jump_threshold_) || !positive(localization_jump_hold_time_) ||
+        !std::isfinite(measured_speed_tolerance_) || measured_speed_tolerance_ < 0.0 ||
         !positive(near_obstacle_distance_) ||
         !std::isfinite(near_obstacle_exploration_scale_) ||
         near_obstacle_exploration_scale_ < 1.0 ||
@@ -395,6 +410,10 @@ private:
       return CallbackReturn::FAILURE;
     }
     backend_->reset();
+    last_commanded_speed_ = 0.0;
+    last_commanded_steering_ = 0.0;
+    last_applied_control_ = Control{};
+    last_command_time_.reset();
     rclcpp::SubscriptionOptions sensor_options;
     sensor_options.callback_group = sensor_callback_group_;
     rclcpp::SubscriptionOptions costmap_options;
@@ -418,8 +437,12 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     RCLCPP_INFO(
-      get_logger(), "Configured %s backend: %zu rollouts x %zu steps, %.1f Hz",
-      backend_->name().c_str(), mppi_.rollout_count, mppi_.horizon_steps, control_frequency_);
+      get_logger(),
+      "Configured %s backend: %zu rollouts x %zu steps, %.1f Hz; "
+      "speed=[%.2f, %.2f] m/s steering=[%.2f, %.2f] rad",
+      backend_->name().c_str(), mppi_.rollout_count, mppi_.horizon_steps, control_frequency_,
+      vehicle_.min_speed, vehicle_.max_speed,
+      vehicle_.min_steering, vehicle_.max_steering);
     return CallbackReturn::SUCCESS;
   }
 
@@ -436,6 +459,7 @@ private:
       control_callback_group_);
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
+    last_commanded_speed_ = 0.0;
     last_output_time_ = now();
     RCLCPP_INFO(get_logger(), "MPPI controller activated; output=%s", command_topic_.c_str());
     return CallbackReturn::SUCCESS;
@@ -738,7 +762,9 @@ private:
     MppiRequest request;
     request.initial_state = timed_state->state;
     active_measured_speed_ = request.initial_state.speed;
-    if (stateWithinLimits(request.initial_state, vehicle_)) {
+    if (clampMeasuredSpeedWithinTolerance(
+        request.initial_state, vehicle_, measured_speed_tolerance_))
+    {
       try {
         request.initial_state = propagateState(
           *model_, request.initial_state, last_applied_control_,
@@ -936,7 +962,14 @@ private:
         command_dt = std::min(elapsed, 2.0 * mppi_.dt);
       }
     }
-    const State commanded_state = model_->step(request.initial_state, result.control, command_dt);
+    State commanded_state = model_->step(request.initial_state, result.control, command_dt);
+    // The actuator consumes a velocity setpoint while MPPI optimizes
+    // acceleration. Integrate the acceleration into a persistent setpoint;
+    // rebuilding it from the measured speed every cycle traps the command
+    // below the motor's static-friction/minimum-ERPM threshold.
+    commanded_state.speed = std::clamp(
+      last_commanded_speed_ + result.control.acceleration * command_dt,
+      vehicle_.min_speed, vehicle_.max_speed);
     publishCommand(commanded_state, result.control, tick_time);
     publishPath(result.predicted_states, tick_time);
     publishDiagnostics(
@@ -946,6 +979,7 @@ private:
       state_age, &result, costmap_age, request.exploration_scale,
       obstacle_age, request_obstacles.size(), obstacles_stale);
     last_commanded_steering_ = commanded_state.steering;
+    last_commanded_speed_ = commanded_state.speed;
     last_applied_control_ = result.control;
     last_command_time_ = tick_time;
     last_output_time_ = tick_time;
@@ -987,6 +1021,7 @@ private:
     State stopped;
     stopped.steering = last_commanded_steering_;
     publishCommand(stopped, Control{0.0, vehicle_.min_acceleration}, stamp);
+    last_commanded_speed_ = 0.0;
     last_applied_control_ = Control{0.0, vehicle_.min_acceleration};
     last_output_time_ = stamp;
     publishDiagnostics(reason, level, state_age, result, costmap_age);
@@ -1209,6 +1244,7 @@ private:
   double localization_position_jump_threshold_{0.50};
   double localization_yaw_jump_threshold_{0.70};
   double localization_jump_hold_time_{0.50};
+  double measured_speed_tolerance_{0.15};
   bool require_costmap_{true};
   int occupied_threshold_{50};
   bool unknown_is_occupied_{true};
@@ -1249,6 +1285,7 @@ private:
   std::optional<rclcpp::Time> last_costmap_processing_time_;
   std::optional<rclcpp::Time> stuck_since_;
   std::optional<rclcpp::Time> last_stuck_recovery_time_;
+  double last_commanded_speed_{0.0};
   double last_commanded_steering_{0.0};
   Control last_applied_control_{};
   std::optional<rclcpp::Time> last_command_time_;
