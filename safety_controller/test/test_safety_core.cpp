@@ -129,6 +129,48 @@ TEST(SafetyCore, BelowMinimumRangeReturnIsIgnoredRatherThanClampedIntoAebPath)
   EXPECT_EQ(result.aeb.valid_beams, scan.ranges.size() - 1U);
 }
 
+TEST(SafetyCore, ConfiguredVehicleSelfReturnDoesNotTriggerAeb)
+{
+  SafetyConfig config;
+  config.self_filter_enabled = true;
+  config.self_filter_min_x = 0.05;
+  config.self_filter_max_x = 0.35;
+  config.self_filter_min_y = -0.22;
+  config.self_filter_max_y = 0.22;
+  SafetyCore core(config);
+  updateFreshInputs(core, 1.0, 0.0, 0.0);
+
+  // Reproduces the dominant real-vehicle return: 3.5 cm from the lidar at
+  // about +12 degrees, or approximately (0.284, 0.007) in base_link.
+  ScanData self_return = singlePointScan(0.284, 0.007);
+  self_return.range_min = 0.023;
+  core.updateScan(self_return, 1.01);
+  const ArbitrationResult result = core.evaluate(1.02);
+
+  EXPECT_FALSE(result.aeb.emergency);
+  EXPECT_EQ(result.aeb.self_filtered_beams, 1U);
+  EXPECT_EQ(result.stop_reason, StopReason::kNone);
+}
+
+TEST(SafetyCore, SelfFilterDoesNotHideObstacleAheadOfVehicle)
+{
+  SafetyConfig config;
+  config.self_filter_enabled = true;
+  config.self_filter_min_x = 0.05;
+  config.self_filter_max_x = 0.35;
+  config.self_filter_min_y = -0.22;
+  config.self_filter_max_y = 0.22;
+  SafetyCore core(config);
+  updateFreshInputs(core, 1.0, 1.0, 0.0);
+
+  core.updateScan(singlePointScan(0.70, 0.0), 1.01);
+  const ArbitrationResult result = core.evaluate(1.02);
+
+  EXPECT_TRUE(result.aeb.emergency);
+  EXPECT_EQ(result.aeb.self_filtered_beams, 0U);
+  EXPECT_EQ(result.stop_reason, StopReason::kAeb);
+}
+
 TEST(SafetyCore, SteeringChangesTheAebSweptPath)
 {
   const ScanData obstacle = singlePointScan(0.81, 0.22);

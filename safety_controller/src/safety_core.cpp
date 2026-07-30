@@ -83,6 +83,13 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     config_.rear_overhang >= config_.vehicle_length ||
     !finiteNonnegative(config_.footprint_margin) ||
     !std::isfinite(config_.lidar_offset_x) || !std::isfinite(config_.lidar_offset_y) ||
+    (config_.self_filter_enabled &&
+    (!std::isfinite(config_.self_filter_min_x) ||
+    !std::isfinite(config_.self_filter_max_x) ||
+    !std::isfinite(config_.self_filter_min_y) ||
+    !std::isfinite(config_.self_filter_max_y) ||
+    config_.self_filter_min_x >= config_.self_filter_max_x ||
+    config_.self_filter_min_y >= config_.self_filter_max_y)) ||
     !finiteNonnegative(config_.aeb_reaction_time) ||
     !finitePositive(config_.aeb_max_deceleration) ||
     !finiteNonnegative(config_.aeb_extra_distance) ||
@@ -274,6 +281,19 @@ AebAssessment SafetyCore::assessAeb() const
       static_cast<double>(beam) * scan_.angle_increment;
     const double point_x = config_.lidar_offset_x + range * std::cos(angle);
     const double point_y = config_.lidar_offset_y + range * std::sin(angle);
+
+    // A scanner mounted inside the vehicle can see fixed bodywork or its
+    // protective bracket. Such points are physically inside the vehicle and
+    // must not be interpreted as an external obstacle at path distance zero.
+    if (config_.self_filter_enabled &&
+      point_x >= config_.self_filter_min_x &&
+      point_x <= config_.self_filter_max_x &&
+      point_y >= config_.self_filter_min_y &&
+      point_y <= config_.self_filter_max_y)
+    {
+      ++assessment.self_filtered_beams;
+      continue;
+    }
 
     for (std::size_t sample = 0U; sample <= sample_count; ++sample) {
       const double distance = assessment.sweep_distance *

@@ -92,6 +92,11 @@ public:
     config.footprint_margin = declare_parameter<double>("footprint_margin", 0.050);
     config.lidar_offset_x = declare_parameter<double>("lidar_offset_x", 0.250);
     config.lidar_offset_y = declare_parameter<double>("lidar_offset_y", 0.0);
+    config.self_filter_enabled = declare_parameter<bool>("self_filter_enabled", false);
+    config.self_filter_min_x = declare_parameter<double>("self_filter_min_x", 0.0);
+    config.self_filter_max_x = declare_parameter<double>("self_filter_max_x", 0.0);
+    config.self_filter_min_y = declare_parameter<double>("self_filter_min_y", 0.0);
+    config.self_filter_max_y = declare_parameter<double>("self_filter_max_y", 0.0);
     config.aeb_reaction_time = declare_parameter<double>("aeb_reaction_time", 0.100);
     config.aeb_max_deceleration = declare_parameter<double>("aeb_max_deceleration", 3.0);
     config.aeb_extra_distance = declare_parameter<double>("aeb_extra_distance", 0.150);
@@ -272,14 +277,21 @@ private:
     status.values.push_back(diagnosticValue("state_age_s", std::to_string(result.state_age)));
     status.values.push_back(diagnosticValue("scan_age_s", std::to_string(result.scan_age)));
     status.values.push_back(diagnosticValue("command_age_s", std::to_string(result.command_age)));
-    status.values.push_back(diagnosticValue(
-      "aeb_emergency", result.aeb.emergency ? "true" : "false"));
-    status.values.push_back(diagnosticValue(
-      "collision_path_distance_m", std::to_string(result.aeb.collision_path_distance)));
-    status.values.push_back(diagnosticValue(
-      "output_speed_mps", std::to_string(result.command.speed)));
-    status.values.push_back(diagnosticValue(
-      "output_steering_rad", std::to_string(result.command.steering_angle)));
+    status.values.push_back(
+      diagnosticValue(
+        "aeb_emergency", result.aeb.emergency ? "true" : "false"));
+    status.values.push_back(
+      diagnosticValue(
+        "aeb_self_filtered_beams", std::to_string(result.aeb.self_filtered_beams)));
+    status.values.push_back(
+      diagnosticValue(
+        "collision_path_distance_m", std::to_string(result.aeb.collision_path_distance)));
+    status.values.push_back(
+      diagnosticValue(
+        "output_speed_mps", std::to_string(result.command.speed)));
+    status.values.push_back(
+      diagnosticValue(
+        "output_steering_rad", std::to_string(result.command.steering_angle)));
     array.status.push_back(std::move(status));
     diagnostics_publisher_->publish(array);
   }

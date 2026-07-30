@@ -68,6 +68,11 @@ struct SafetyConfig
   double footprint_margin{0.050};
   double lidar_offset_x{0.250};
   double lidar_offset_y{0.0};
+  bool self_filter_enabled{false};
+  double self_filter_min_x{0.0};
+  double self_filter_max_x{0.0};
+  double self_filter_min_y{0.0};
+  double self_filter_max_y{0.0};
 
   double aeb_reaction_time{0.100};
   double aeb_max_deceleration{3.0};
@@ -82,6 +87,7 @@ struct AebAssessment
   bool scan_valid{false};
   bool emergency{false};
   std::size_t valid_beams{0U};
+  std::size_t self_filtered_beams{0U};
   double collision_path_distance{std::numeric_limits<double>::infinity()};
   double sweep_distance{0.0};
 };

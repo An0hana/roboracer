@@ -42,6 +42,11 @@ public:
     declare_parameter<double>("max_range", 30.0);
     declare_parameter<double>("wall_connection_max_gap", 0.20);
     declare_parameter<double>("wall_connection_spacing", 0.025);
+    declare_parameter<bool>("self_filter_enabled", false);
+    declare_parameter<double>("self_filter_min_x", 0.0);
+    declare_parameter<double>("self_filter_max_x", 0.0);
+    declare_parameter<double>("self_filter_min_y", 0.0);
+    declare_parameter<double>("self_filter_max_y", 0.0);
 
     scan_topic_ = get_parameter("scan_topic").as_string();
     odom_topic_ = get_parameter("odom_topic").as_string();
@@ -55,9 +60,19 @@ public:
       get_parameter("wall_connection_max_gap").as_double();
     wall_connection_spacing_ =
       get_parameter("wall_connection_spacing").as_double();
+    self_filter_enabled_ = get_parameter("self_filter_enabled").as_bool();
+    self_filter_min_x_ = get_parameter("self_filter_min_x").as_double();
+    self_filter_max_x_ = get_parameter("self_filter_max_x").as_double();
+    self_filter_min_y_ = get_parameter("self_filter_min_y").as_double();
+    self_filter_max_y_ = get_parameter("self_filter_max_y").as_double();
     if (!positive(odom_timeout_) || !positive(tf_timeout_) || !positive(max_range_) ||
       !positive(wall_connection_max_gap_) || !positive(wall_connection_spacing_) ||
-      wall_connection_spacing_ > wall_connection_max_gap_)
+      wall_connection_spacing_ > wall_connection_max_gap_ ||
+      (self_filter_enabled_ &&
+      (!std::isfinite(self_filter_min_x_) || !std::isfinite(self_filter_max_x_) ||
+      !std::isfinite(self_filter_min_y_) || !std::isfinite(self_filter_max_y_) ||
+      self_filter_min_x_ >= self_filter_max_x_ ||
+      self_filter_min_y_ >= self_filter_max_y_)))
     {
       throw std::invalid_argument("local costmap timing and range parameters must be positive");
     }
@@ -179,6 +194,11 @@ private:
     const double scan_yaw = tf2::getYaw(map_to_scan.transform.rotation);
     const double scan_x = map_to_scan.transform.translation.x;
     const double scan_y = map_to_scan.transform.translation.y;
+    const double base_yaw = tf2::getYaw(map_to_base.transform.rotation);
+    const double base_x = map_to_base.transform.translation.x;
+    const double base_y = map_to_base.transform.translation.y;
+    const double base_cosine = std::cos(base_yaw);
+    const double base_sine = std::sin(base_yaw);
     const double usable_max_range = std::min<double>(message->range_max, max_range_);
     std::vector<IndexedPoint2d> indexed_hits;
     indexed_hits.reserve(message->ranges.size());
@@ -192,20 +212,30 @@ private:
       const double angle =
         scan_yaw + static_cast<double>(message->angle_min) +
         static_cast<double>(index) * static_cast<double>(message->angle_increment);
-      indexed_hits.push_back(IndexedPoint2d{
-        index,
-        Point2d{
-          scan_x + range * std::cos(angle),
-          scan_y + range * std::sin(angle)}});
+      const double hit_x = scan_x + range * std::cos(angle);
+      const double hit_y = scan_y + range * std::sin(angle);
+      const double dx = hit_x - base_x;
+      const double dy = hit_y - base_y;
+      const double base_hit_x = base_cosine * dx + base_sine * dy;
+      const double base_hit_y = -base_sine * dx + base_cosine * dy;
+      if (self_filter_enabled_ &&
+        base_hit_x >= self_filter_min_x_ && base_hit_x <= self_filter_max_x_ &&
+        base_hit_y >= self_filter_min_y_ && base_hit_y <= self_filter_max_y_)
+      {
+        continue;
+      }
+      indexed_hits.push_back(
+        IndexedPoint2d{
+          index,
+          Point2d{hit_x, hit_y}});
     }
     const std::vector<Point2d> hits = connectAdjacentHits(
       indexed_hits, wall_connection_max_gap_, wall_connection_spacing_);
 
     CostmapGrid grid;
     try {
-      const double base_yaw = tf2::getYaw(map_to_base.transform.rotation);
       grid = costmap_->update(
-        map_to_base.transform.translation.x, map_to_base.transform.translation.y,
+        base_x, base_y,
         base_yaw, source_stamp.seconds(), hits);
     } catch (const std::exception & exception) {
       RCLCPP_ERROR(get_logger(), "Costmap update failed: %s", exception.what());
@@ -238,6 +268,11 @@ private:
   double max_range_{30.0};
   double wall_connection_max_gap_{0.20};
   double wall_connection_spacing_{0.025};
+  bool self_filter_enabled_{false};
+  double self_filter_min_x_{0.0};
+  double self_filter_max_x_{0.0};
+  double self_filter_min_y_{0.0};
+  double self_filter_max_y_{0.0};
 
   std::unique_ptr<RollingCostmap> costmap_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;

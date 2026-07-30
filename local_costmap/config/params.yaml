@@ -18,3 +18,10 @@ local_costmap:
     max_range: 30.0
     wall_connection_max_gap: 0.20
     wall_connection_spacing: 0.025
+    # Match the safety-controller vehicle self-return mask. Coordinates are
+    # expressed in base_link; normal obstacles outside the vehicle remain.
+    self_filter_enabled: true
+    self_filter_min_x: 0.05
+    self_filter_max_x: 0.35
+    self_filter_min_y: -0.22
+    self_filter_max_y: 0.22

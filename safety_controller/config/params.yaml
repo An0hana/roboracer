@@ -35,6 +35,14 @@ safety_controller:
     footprint_margin: 0.050
     lidar_offset_x: 0.250
     lidar_offset_y: 0.0
+    # The real scanner sees two fixed parts of its body/protective mount.
+    # Bounds are in base_link and were measured from a stationary open-area
+    # rosbag. They remain inside the vehicle's present-time AEB footprint.
+    self_filter_enabled: true
+    self_filter_min_x: 0.05
+    self_filter_max_x: 0.35
+    self_filter_min_y: -0.22
+    self_filter_max_y: 0.22
     steering_estimation_min_speed: 0.050
     max_state_steering_angle: 0.60
 
