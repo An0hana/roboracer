@@ -1066,38 +1066,25 @@ private:
       const std::string reason = result.valid ? "solve_timeout" : result.reason;
       safeResetBackend();
 
-      // A single-cycle solver failure is common near costmap boundaries;
-      // immediately stopping amplifies it into a permanent deadlock.  When
-      // the steering commands are still geometrically reasonable (the user
-      // can push the car forward without collision), the only missing
-      // ingredient is propulsion.  Creep forward at low speed with the
-      // last known-good steering for a short recovery window before
-      // falling back to a hard stop.
       if (!last_solver_failure_time_.has_value()) {
         last_solver_failure_time_ = tick_time;
       }
       const double failure_duration =
         (tick_time - *last_solver_failure_time_).seconds();
 
-      constexpr double kRecoveryMaxSpeed = 0.50;    // m/s
-      constexpr double kRecoveryAcceleration = 0.50; // m/s²
+      constexpr double kRecoveryMaxSpeed = 1.0;
+      constexpr double kRecoveryAcceleration = 1.0;
 
-      // Keep creeping at low speed as long as the solver fails.  In narrow
-      // corridors the CUDA repair/fallback may reject every trajectory even
-      // though the vehicle is physically safe (the user can push it through).
-      // A hard stop turns a marginal clearance into a permanent deadlock.
       {
-        // Creep forward: keep the last steering, command recovery speed
-        // directly without integration so the motor sees a consistent
-        // setpoint above its static-friction deadzone.
         State recovery_state = request.initial_state;
-        recovery_state.steering_command = last_commanded_steering_;
+        const double mppi_steering_rate = std::isfinite(result.control.steering_rate) ?
+          result.control.steering_rate : 0.0;
+        recovery_state.steering_command = std::clamp(
+          last_commanded_steering_ + mppi_steering_rate * command_dt,
+          vehicle_.min_steering, vehicle_.max_steering);
         recovery_state.speed = kRecoveryMaxSpeed;
         Control recovery_control{
-          std::clamp(
-            (recovery_state.steering_command - request.initial_state.steering_command) /
-            std::max(command_dt, 1.0e-6),
-            vehicle_.min_steering_rate, vehicle_.max_steering_rate),
+          mppi_steering_rate,
           kRecoveryAcceleration};
         publishCommand(recovery_state, recovery_control, tick_time);
         publishDiagnostics(
