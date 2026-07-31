@@ -306,7 +306,11 @@ State BicycleModel::derivative(const State & state, const Control & control) con
   State derivative;
   derivative.x = bounded_state.speed * std::cos(bounded_state.yaw);
   derivative.y = bounded_state.speed * std::sin(bounded_state.yaw);
-  derivative.yaw = bounded_state.speed * std::tan(bounded_state.steering) / config_.wheelbase;
+  const double kinematic_yaw_rate =
+    bounded_state.speed * std::tan(bounded_state.steering) / config_.wheelbase;
+  const double max_yaw_rate =
+    config_.max_lateral_acceleration / std::max(std::abs(bounded_state.speed), 0.1);
+  derivative.yaw = std::clamp(kinematic_yaw_rate, -max_yaw_rate, max_yaw_rate);
   derivative.speed = bounded.acceleration;
   const double steering_error =
     effectiveSteeringTarget(

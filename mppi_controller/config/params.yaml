@@ -122,8 +122,11 @@ mppi_controller:
       max_effective_steering_rate: 2.0
       effective_steering_rate_speed_coefficient: 0.10
       steering_effectiveness_at_zero_speed: 1.0
-      steering_effectiveness_speed_squared: 0.04
-      minimum_steering_effectiveness: 0.60
+      # At 3.7 m/s: eff = 1.0 - 0.08*13.69 = -0.095 -> clamped to 0.45.
+      # This predicts significant understeer at racing speed so MPPI does
+      # not command a curvature the tyres cannot deliver.
+      steering_effectiveness_speed_squared: 0.08
+      minimum_steering_effectiveness: 0.45
       min_acceleration: -1.5
       max_acceleration: 1.0
       min_speed: 0.0

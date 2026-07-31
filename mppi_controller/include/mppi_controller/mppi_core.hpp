@@ -79,6 +79,7 @@ struct VehicleConfig
   double max_acceleration{1.0};
   double min_speed{0.0};
   double max_speed{2.0};
+  double max_lateral_acceleration{6.0};
 };
 
 [[nodiscard]] double steeringEffectiveness(

@@ -133,6 +133,7 @@ struct F1TenthDynamicsParams : public DynamicsParams
   float steering_effectiveness_at_zero_speed{1.0F};
   float steering_effectiveness_speed_squared{0.05F};
   float minimum_steering_effectiveness{0.70F};
+  float max_lateral_acceleration{6.0F};
 };
 
 constexpr int kSteeringRateIndex =
@@ -180,8 +181,11 @@ public:
   {
     derivative(S_INDEX(POS_X)) = state(S_INDEX(SPEED)) * cosf(state(S_INDEX(YAW)));
     derivative(S_INDEX(POS_Y)) = state(S_INDEX(SPEED)) * sinf(state(S_INDEX(YAW)));
-    derivative(S_INDEX(YAW)) = state(S_INDEX(SPEED)) * tanf(state(S_INDEX(STEERING))) /
-      this->params_.wheelbase;
+    const float kyaw_h = state(S_INDEX(SPEED)) *
+      tanf(state(S_INDEX(STEERING))) / this->params_.wheelbase;
+    const float myaw_h = this->params_.max_lateral_acceleration /
+      fmaxf(fabsf(state(S_INDEX(SPEED))), 0.1F);
+    derivative(S_INDEX(YAW)) = fminf(fmaxf(kyaw_h, -myaw_h), myaw_h);
     derivative(S_INDEX(SPEED)) = control(kAccelerationIndex);
     derivative(S_INDEX(STEERING)) = effectiveSteeringDerivativeHost(state);
     derivative(S_INDEX(STEERING_COMMAND)) = control(kSteeringRateIndex);
@@ -199,8 +203,11 @@ public:
     }
     derivative[S_INDEX(POS_X)] = state[S_INDEX(SPEED)] * cosf(state[S_INDEX(YAW)]);
     derivative[S_INDEX(POS_Y)] = state[S_INDEX(SPEED)] * sinf(state[S_INDEX(YAW)]);
-    derivative[S_INDEX(YAW)] = state[S_INDEX(SPEED)] * tanf(state[S_INDEX(STEERING)]) /
-      this->params_.wheelbase;
+    const float kyaw_d = state[S_INDEX(SPEED)] *
+      tanf(state[S_INDEX(STEERING)]) / this->params_.wheelbase;
+    const float myaw_d = this->params_.max_lateral_acceleration /
+      fmaxf(fabsf(state[S_INDEX(SPEED)]), 0.1F);
+    derivative[S_INDEX(YAW)] = fminf(fmaxf(kyaw_d, -myaw_d), myaw_d);
     derivative[S_INDEX(SPEED)] = control[kAccelerationIndex];
     derivative[S_INDEX(STEERING)] = effectiveSteeringDerivativeDevice(state);
     derivative[S_INDEX(STEERING_COMMAND)] = control[kSteeringRateIndex];
@@ -1386,6 +1393,8 @@ private:
       static_cast<float>(vehicle_.steering_effectiveness_speed_squared);
     dynamics_params.minimum_steering_effectiveness =
       static_cast<float>(vehicle_.minimum_steering_effectiveness);
+    dynamics_params.max_lateral_acceleration =
+      static_cast<float>(vehicle_.max_lateral_acceleration);
     dynamics_ = std::make_unique<F1TenthDynamics>(dynamics_params, vehicle_);
 
     cost_ = std::make_unique<F1TenthRaceCost>();

@@ -270,6 +270,8 @@ private:
       vehicle_.max_acceleration = parameter<double>("vehicle.max_acceleration");
       vehicle_.min_speed = parameter<double>("vehicle.min_speed");
       vehicle_.max_speed = parameter<double>("vehicle.max_speed");
+      vehicle_.max_lateral_acceleration =
+        parameter<double>("mppi.max_lateral_acceleration");
       model_ = std::make_unique<BicycleModel>(vehicle_);
 
       const int rollouts = parameter<int>("mppi.rollout_count");

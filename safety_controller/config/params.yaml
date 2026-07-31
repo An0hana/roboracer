@@ -35,6 +35,9 @@ safety_controller:
     max_effective_steering_rate: 2.0
     effective_steering_rate_speed_coefficient: 0.10
     steering_effectiveness_at_zero_speed: 1.0
+    # AEB must use a more optimistic steering model than MPPI so the swept
+    # corridor follows the tighter path the vehicle can physically achieve
+    # when grip is available, avoiding false triggers on corner exit walls.
     steering_effectiveness_speed_squared: 0.04
     minimum_steering_effectiveness: 0.60
 
