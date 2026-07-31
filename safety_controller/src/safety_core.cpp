@@ -385,7 +385,7 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
       result.command.steering_angle,
       config_.min_command_steering, config_.max_command_steering);
     if (aeb_soft) {
-      result.command.speed = std::min(result.command.speed, 1.0);
+      result.command.speed = 1.5;
     }
     if (aeb_resume_active_) {
       aeb_resume_speed_limit_ = std::min(

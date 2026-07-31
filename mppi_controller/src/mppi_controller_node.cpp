@@ -1072,7 +1072,7 @@ private:
       const double failure_duration =
         (tick_time - *last_solver_failure_time_).seconds();
 
-      constexpr double kRecoveryMaxSpeed = 1.0;
+      constexpr double kRecoveryMaxSpeed = 1.5;
       constexpr double kRecoveryAcceleration = 1.0;
 
       {
@@ -1087,6 +1087,7 @@ private:
           mppi_steering_rate,
           kRecoveryAcceleration};
         publishCommand(recovery_state, recovery_control, tick_time);
+        publishPath(result.predicted_states, tick_time);
         publishDiagnostics(
           "solver_failure_recovery",
           diagnostic_msgs::msg::DiagnosticStatus::WARN,
