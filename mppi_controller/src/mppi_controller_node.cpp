@@ -1077,9 +1077,9 @@ private:
       const double failure_duration =
         (tick_time - *last_solver_failure_time_).seconds();
 
-      constexpr double kRecoveryWindow = 3.0;       // seconds
-      constexpr double kRecoveryMaxSpeed = 0.30;    // m/s
-      constexpr double kRecoveryAcceleration = 0.30; // m/s²
+      constexpr double kRecoveryWindow = 5.0;       // seconds
+      constexpr double kRecoveryMaxSpeed = 0.50;    // m/s
+      constexpr double kRecoveryAcceleration = 0.50; // m/s²
 
       if (std::isfinite(failure_duration) && failure_duration <= kRecoveryWindow) {
         // Creep forward: keep the last steering, apply gentle acceleration.
