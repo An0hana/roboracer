@@ -111,6 +111,7 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !finiteNonnegative(config_.aeb_release_extra_distance) ||
     !finiteNonnegative(config_.aeb_release_check_speed) ||
     !finitePositive(config_.aeb_resume_acceleration) ||
+    !finiteNonnegative(config_.aeb_max_latch_duration) ||
     !finiteNonnegative(config_.aeb_steering_recovery_max_speed) ||
     !finitePositive(config_.aeb_steering_recovery_rate) ||
     !finiteNonnegative(config_.aeb_steering_recovery_tolerance) ||
@@ -216,6 +217,7 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     aeb_resume_speed_limit_ = 0.0;
     if (!was_latched) {
       aeb_recovery_steering_angle_ = estimated_effective_steering_angle_;
+      aeb_latch_start_ = now_seconds;
     }
   }
 
@@ -255,17 +257,48 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
   }
 
   if (!result.aeb.emergency && aeb_latched_) {
+    // The release assessment must check whether the forward corridor is
+    // clear at a speed the vehicle can actually reach.  Using the full
+    // commanded speed (capped at aeb_release_check_speed) when the car is
+    // stationary is physically unrealistic: the vehicle would need to
+    // accelerate from rest first, and the resume ramp already enforces a
+    // gradual speed increase after release.
+    //
+    // Cap the release speed at what the vehicle could attain within one
+    // clear-hold window under the resume acceleration, but never below the
+    // measured speed or above the (capped) commanded speed.
+    const double resume_cap = std::abs(current_speed_) +
+      config_.aeb_resume_acceleration * config_.aeb_clear_hold_time;
     const double release_speed = release_inputs_fresh ?
-      std::max(
-      std::abs(current_speed_),
-      std::min(std::abs(selected_command.command.speed), config_.aeb_release_check_speed)) :
+      std::max(std::abs(current_speed_),
+               std::min({resume_cap,
+                         std::abs(selected_command.command.speed),
+                         config_.aeb_release_check_speed})) :
       std::abs(current_speed_);
     const double release_steering_command = release_inputs_fresh ?
       aeb_recovery_steering_angle_ : measured_steering_angle_;
     const AebAssessment release_assessment = assessAeb(
       release_speed, release_steering_command,
       estimated_effective_steering_angle_, config_.aeb_release_extra_distance);
-    if (!release_inputs_fresh || !recovery_ready || release_assessment.emergency) {
+
+    // Enforce a hard upper bound on how long AEB may stay latched.  A
+    // false-positive trigger in a narrow corridor can otherwise persist
+    // indefinitely when the release corridor remains obstructed by the
+    // same static geometry that caused the original trigger.
+    bool latch_timed_out = false;
+    if (config_.aeb_max_latch_duration > 0.0 &&
+      aeb_latch_start_.has_value() &&
+      std::isfinite(now_seconds))
+    {
+      const double latch_duration = now_seconds - *aeb_latch_start_;
+      if (latch_duration >= config_.aeb_max_latch_duration) {
+        latch_timed_out = true;
+      }
+    }
+
+    if (!release_inputs_fresh || (!latch_timed_out && !recovery_ready) ||
+      (!latch_timed_out && release_assessment.emergency))
+    {
       aeb_clear_since_.reset();
     } else {
       if (!aeb_clear_since_.has_value()) {
@@ -279,6 +312,7 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
         aeb_resume_active_ = true;
         aeb_resume_speed_limit_ = 0.0;
         aeb_clear_since_.reset();
+        aeb_latch_start_.reset();
       }
     }
   }

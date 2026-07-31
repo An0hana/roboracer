@@ -94,6 +94,7 @@ struct SafetyConfig
   double aeb_clear_hold_time{0.200};
   double aeb_release_extra_distance{0.100};
   double aeb_release_check_speed{1.500};
+  double aeb_max_latch_duration{5.0};
   double aeb_resume_acceleration{1.000};
   // While AEB keeps propulsion at zero, let the steering target move slowly
   // toward the fresh controller request. Release is considered only after
@@ -207,6 +208,7 @@ private:
   bool aeb_latched_{false};
   bool aeb_resume_active_{false};
   std::optional<double> aeb_clear_since_;
+  std::optional<double> aeb_latch_start_;
   double aeb_resume_speed_limit_{std::numeric_limits<double>::infinity()};
   std::optional<double> last_evaluation_time_;
 };

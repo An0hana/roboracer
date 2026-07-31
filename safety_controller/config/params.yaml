@@ -71,6 +71,10 @@ safety_controller:
     aeb_clear_hold_time: 0.200
     aeb_release_extra_distance: 0.100
     aeb_release_check_speed: 1.500
+    # Hard upper bound on AEB latch duration.  A false-positive trigger in a
+    # narrow corridor can otherwise persist indefinitely.  After this timeout
+    # the latch is force-cleared even if the release assessment would object.
+    aeb_max_latch_duration: 5.0
     # Once released, ramp the final velocity setpoint instead of jumping from
     # zero straight back to the upstream controller's command.
     aeb_resume_acceleration: 1.000
