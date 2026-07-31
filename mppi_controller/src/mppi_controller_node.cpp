@@ -509,6 +509,7 @@ private:
       sensor_options);
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
+    last_solver_failure_time_.reset();
     RCLCPP_INFO(
       get_logger(),
       "Configured %s backend: %zu rollouts x %zu steps, %.1f Hz; "
@@ -532,6 +533,7 @@ private:
       control_callback_group_);
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
+    last_solver_failure_time_.reset();
     last_commanded_speed_ = 0.0;
     overspeed_recovery_.reset();
     last_output_time_ = now();
@@ -576,6 +578,7 @@ private:
     }
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
+    last_solver_failure_time_.reset();
     {
       std::lock_guard<std::mutex> lock(costmap_callback_mutex_);
       last_costmap_processing_time_.reset();
@@ -1060,11 +1063,66 @@ private:
     if (!result.valid || result.solve_time_ms > max_solve_time_ms_) {
       const std::string reason = result.valid ? "solve_timeout" : result.reason;
       safeResetBackend();
+
+      // A single-cycle solver failure is common near costmap boundaries;
+      // immediately stopping amplifies it into a permanent deadlock.  When
+      // the steering commands are still geometrically reasonable (the user
+      // can push the car forward without collision), the only missing
+      // ingredient is propulsion.  Creep forward at low speed with the
+      // last known-good steering for a short recovery window before
+      // falling back to a hard stop.
+      if (!last_solver_failure_time_.has_value()) {
+        last_solver_failure_time_ = tick_time;
+      }
+      const double failure_duration =
+        (tick_time - *last_solver_failure_time_).seconds();
+
+      constexpr double kRecoveryWindow = 3.0;       // seconds
+      constexpr double kRecoveryMaxSpeed = 0.30;    // m/s
+      constexpr double kRecoveryAcceleration = 0.30; // m/s²
+
+      if (std::isfinite(failure_duration) && failure_duration <= kRecoveryWindow) {
+        // Creep forward: keep the last steering, apply gentle acceleration.
+        State recovery_state = request.initial_state;
+        recovery_state.steering_command = last_commanded_steering_;
+        recovery_state.speed = std::min(
+          last_commanded_speed_ + kRecoveryAcceleration * command_dt,
+          kRecoveryMaxSpeed);
+        Control recovery_control{
+          std::clamp(
+            (recovery_state.steering_command - request.initial_state.steering_command) /
+            std::max(command_dt, 1.0e-6),
+            vehicle_.min_steering_rate, vehicle_.max_steering_rate),
+          std::clamp(
+            (recovery_state.speed - last_commanded_speed_) /
+            std::max(command_dt, 1.0e-6),
+            vehicle_.min_acceleration, vehicle_.max_acceleration)};
+        publishCommand(recovery_state, recovery_control, tick_time);
+        publishDiagnostics(
+          "solver_failure_recovery",
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          state_age, &result, costmap_age);
+        last_commanded_steering_ = recovery_state.steering_command;
+        last_commanded_steering_atomic_.store(last_commanded_steering_);
+        last_commanded_speed_ = recovery_state.speed;
+        last_applied_control_ = recovery_control;
+        last_command_time_ = tick_time;
+        last_output_time_ = tick_time;
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "MPPI solver recovery creep: reason=%s speed=%.2f m/s dur=%.1f s",
+          reason.c_str(), recovery_state.speed, failure_duration);
+        return;
+      }
+
+      // Recovery window exhausted — hard stop.
       publishStop(
         reason, diagnostic_msgs::msg::DiagnosticStatus::ERROR,
         state_age, &result, costmap_age);
       return;
     }
+    // Solver succeeded — clear failure tracking.
+    last_solver_failure_time_.reset();
 
     const double requested_target_speed =
       result.metrics.target_speed * request.behavior.speed_scale;
@@ -1476,6 +1534,7 @@ private:
   std::optional<rclcpp::Time> last_costmap_processing_time_;
   std::optional<rclcpp::Time> stuck_since_;
   std::optional<rclcpp::Time> last_stuck_recovery_time_;
+  std::optional<rclcpp::Time> last_solver_failure_time_;
   double last_commanded_speed_{0.0};
   double last_commanded_steering_{0.0};
   std::atomic<double> last_commanded_steering_atomic_{0.0};
