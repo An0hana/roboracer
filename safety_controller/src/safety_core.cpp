@@ -296,8 +296,11 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
       }
     }
 
+    const bool mppi_planning_ok = selected_command.received &&
+      selected_command.command.valid() &&
+      selected_command.command.speed > 0.1;
     if (!release_inputs_fresh || (!latch_timed_out && !recovery_ready) ||
-      (!latch_timed_out && release_assessment.emergency))
+      (!latch_timed_out && !mppi_planning_ok && release_assessment.emergency))
     {
       aeb_clear_since_.reset();
     } else {
@@ -354,6 +357,12 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
 
   if (result.stopped()) {
     result.command = stopCommand(result.stop_reason);
+    if (result.stop_reason == StopReason::kAeb &&
+      selected_command.received && selected_command.command.valid()) {
+      result.command.steering_angle = std::clamp(
+        selected_command.command.steering_angle,
+        config_.min_command_steering, config_.max_command_steering);
+    }
     output_steering_angle_ = result.command.steering_angle;
   } else {
     result.command = selected_command.command;
