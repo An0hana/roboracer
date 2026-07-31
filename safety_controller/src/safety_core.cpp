@@ -112,6 +112,7 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !finiteNonnegative(config_.aeb_release_check_speed) ||
     !finitePositive(config_.aeb_resume_acceleration) ||
     !finiteNonnegative(config_.aeb_max_latch_duration) ||
+    !finiteNonnegative(config_.aeb_debounce_duration) ||
     !finiteNonnegative(config_.aeb_steering_recovery_max_speed) ||
     !finitePositive(config_.aeb_steering_recovery_rate) ||
     !finiteNonnegative(config_.aeb_steering_recovery_tolerance) ||
@@ -211,15 +212,27 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     selected_command.command.valid();
   const bool was_latched = aeb_latched_;
   if (result.aeb.emergency) {
-    aeb_latched_ = true;
-    aeb_resume_active_ = false;
-    aeb_clear_since_.reset();
-    aeb_resume_speed_limit_ = 0.0;
-    if (!was_latched) {
-      aeb_recovery_steering_angle_ = estimated_effective_steering_angle_;
-      aeb_latch_start_ = now_seconds;
+    if (!aeb_emergency_since_.has_value()) {
+      aeb_emergency_since_ = now_seconds;
     }
+    const double emergency_duration = now_seconds - *aeb_emergency_since_;
+    if (emergency_duration >= config_.aeb_debounce_duration) {
+      aeb_latched_ = true;
+      aeb_resume_active_ = false;
+      aeb_clear_since_.reset();
+      aeb_resume_speed_limit_ = 0.0;
+      if (!was_latched) {
+        aeb_recovery_steering_angle_ = estimated_effective_steering_angle_;
+        aeb_latch_start_ = now_seconds;
+      }
+    }
+  } else {
+    aeb_emergency_since_.reset();
   }
+  const bool aeb_soft = result.aeb.emergency &&
+    aeb_emergency_since_.has_value() &&
+    (now_seconds - *aeb_emergency_since_) < config_.aeb_debounce_duration &&
+    !aeb_latched_;
 
   bool recovery_active = false;
   bool recovery_ready = false;
@@ -371,6 +384,9 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     result.command.steering_angle = std::clamp(
       result.command.steering_angle,
       config_.min_command_steering, config_.max_command_steering);
+    if (aeb_soft) {
+      result.command.speed = std::min(result.command.speed, 1.0);
+    }
     if (aeb_resume_active_) {
       aeb_resume_speed_limit_ = std::min(
         config_.max_command_speed,

@@ -103,6 +103,7 @@ struct SafetyConfig
   double aeb_steering_recovery_max_speed{0.100};
   double aeb_steering_recovery_rate{0.800};
   double aeb_steering_recovery_tolerance{0.020};
+  double aeb_debounce_duration{0.50};
   double scan_min_valid_fraction{0.50};
 };
 
@@ -209,6 +210,7 @@ private:
   bool aeb_resume_active_{false};
   std::optional<double> aeb_clear_since_;
   std::optional<double> aeb_latch_start_;
+  std::optional<double> aeb_emergency_since_;
   double aeb_resume_speed_limit_{std::numeric_limits<double>::infinity()};
   std::optional<double> last_evaluation_time_;
 };

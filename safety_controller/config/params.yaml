@@ -64,8 +64,7 @@ safety_controller:
     aeb_release_extra_distance: 0.0
     aeb_release_check_speed: 1.500
     aeb_max_latch_duration: 1.5
-    # Once released, ramp the final velocity setpoint instead of jumping from
-    # zero straight back to the upstream controller's command.
+    aeb_debounce_duration: 0.50
     aeb_resume_acceleration: 1.000
     # Keep propulsion at zero while allowing a bounded steering-only recovery
     # after the vehicle has slowed below 0.10 m/s. AEB releases only after the
