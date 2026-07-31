@@ -15,17 +15,28 @@ safety_controller:
     # A mode change is rejected unless the state is fresh and speed is below
     # this threshold. A fault never causes an automatic controller switch.
     switch_speed_threshold: 0.20
-    # During a stop, retain a bounded measured steering angle while moving,
-    # then center at near-zero speed to prevent a stale curved AEB sweep from
-    # locking the steering against an obstacle.
+    # Non-AEB faults retain measured steering while moving and center only
+    # near zero speed. AEB uses the separate steering-only recovery below.
     stop_steering_center_speed: 0.050
     state_timeout: 0.100
     scan_timeout: 0.150
     command_timeout: 0.100
     min_command_speed: 0.0
     max_command_speed: 2.0
-    min_command_steering: -0.20
-    max_command_steering: 0.20
+    # Match MPPI's full verified command envelope. With the current linear
+    # conversion +/-0.32 rad maps to servo 0.75744/0.20256, still inside the
+    # independent VESC hardware bounds [0.15, 0.85].
+    min_command_steering: -0.32
+    max_command_steering: 0.32
+    # Must match mppi_controller.vehicle: AEB predicts the swept footprint
+    # from effective wheel angle, not from an instantly-applied servo target.
+    steering_response_time: 0.150
+    min_effective_steering_rate: -1.20
+    max_effective_steering_rate: 1.20
+    effective_steering_rate_speed_coefficient: 0.18
+    steering_effectiveness_at_zero_speed: 1.0
+    steering_effectiveness_speed_squared: 0.05
+    minimum_steering_effectiveness: 0.70
 
     # Measured vehicle geometry, expressed relative to the rear axle.
     wheelbase: 0.324
@@ -43,7 +54,9 @@ safety_controller:
     self_filter_max_x: 0.35
     self_filter_min_y: -0.22
     self_filter_max_y: 0.22
-    steering_estimation_min_speed: 0.050
+    # Below 0.5 m/s, atan(wheelbase*yaw_rate/speed) is noise dominated.
+    # Retain the bounded actuator prediction instead.
+    steering_estimation_min_speed: 0.500
     max_state_steering_angle: 0.60
 
     # Swept-rectangle AEB distance = reaction*v + v^2/(2*decel) + extra.
@@ -52,4 +65,21 @@ safety_controller:
     aeb_extra_distance: 0.150
     aeb_max_sweep_distance: 3.0
     aeb_sweep_step: 0.050
+    # Trigger immediately, but require a larger candidate-command corridor to
+    # remain clear before releasing. This prevents scan-boundary chatter from
+    # alternating the final command between zero and full speed.
+    aeb_clear_hold_time: 0.200
+    aeb_release_extra_distance: 0.100
+    aeb_release_check_speed: 1.500
+    # Once released, ramp the final velocity setpoint instead of jumping from
+    # zero straight back to the upstream controller's command.
+    aeb_resume_acceleration: 1.000
+    # Keep propulsion at zero while allowing a bounded steering-only recovery
+    # after the vehicle has slowed below 0.10 m/s. AEB releases only after the
+    # recovery target is reached and its swept path is clear for the normal
+    # 0.20 s hold time.
+    aeb_steering_recovery_enabled: true
+    aeb_steering_recovery_max_speed: 0.100
+    aeb_steering_recovery_rate: 0.800
+    aeb_steering_recovery_tolerance: 0.020
     scan_min_valid_fraction: 0.50

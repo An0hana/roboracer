@@ -4,7 +4,7 @@ ROS 2 Humble lifecycle controller with two implementations of the same `MppiBack
 interface:
 
 - `cpu_reference`: deterministic ROS-independent correctness and safety reference.
-- `cuda_mppi_generic_v0.9.0`: required runtime, fixed-shape 2048-rollout/48-step C++/CUDA backend
+- `cuda_mppi_generic_v0.9.0`: required runtime, fixed-shape 2048-rollout/72-step C++/CUDA backend
   built against the pinned `mppi_generic_vendor` package.
 
 Simulation and vehicle launches default to `backend=cuda` and fail configuration when CUDA is
@@ -123,7 +123,7 @@ For online Gym simulation, pass `command_topic:=/drive use_sim_time:=false` beca
 bridge does not publish `/clock`. Use simulated time only for clocked simulation or rosbag
 playback. On hardware, keep `/control/mppi_cmd` and let the safety arbiter own `/ackermann_cmd`.
 
-The default is 2048 rollouts, 48 steps, 0.05 s model time (2.4 s horizon), and 20 Hz. The
+The default is 2048 rollouts, 72 steps, 1/30 s model time (2.4 s horizon), and 30 Hz. The
 controller rejects reverse/U-turn rollouts, penalizes insufficient terminal progress, and
 requires the configured horizon to cover the maximum-speed braking distance. Those rollout
 and horizon sizes are compile-time constants for CUDA; requesting different values with

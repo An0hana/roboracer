@@ -78,6 +78,18 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !std::isfinite(config_.min_command_steering) ||
     !std::isfinite(config_.max_command_steering) ||
     config_.min_command_steering >= config_.max_command_steering ||
+    !finitePositive(config_.steering_response_time) ||
+    !std::isfinite(config_.min_effective_steering_rate) ||
+    !std::isfinite(config_.max_effective_steering_rate) ||
+    config_.min_effective_steering_rate >= 0.0 ||
+    config_.max_effective_steering_rate <= 0.0 ||
+    !finiteNonnegative(config_.effective_steering_rate_speed_coefficient) ||
+    !finitePositive(config_.steering_effectiveness_at_zero_speed) ||
+    config_.steering_effectiveness_at_zero_speed > 1.0 ||
+    !finiteNonnegative(config_.steering_effectiveness_speed_squared) ||
+    !finitePositive(config_.minimum_steering_effectiveness) ||
+    config_.minimum_steering_effectiveness >
+    config_.steering_effectiveness_at_zero_speed ||
     !finitePositive(config_.wheelbase) || !finitePositive(config_.vehicle_length) ||
     !finitePositive(config_.vehicle_width) || !finiteNonnegative(config_.rear_overhang) ||
     config_.rear_overhang >= config_.vehicle_length ||
@@ -95,6 +107,13 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !finiteNonnegative(config_.aeb_extra_distance) ||
     !finitePositive(config_.aeb_max_sweep_distance) ||
     !finitePositive(config_.aeb_sweep_step) ||
+    !finiteNonnegative(config_.aeb_clear_hold_time) ||
+    !finiteNonnegative(config_.aeb_release_extra_distance) ||
+    !finiteNonnegative(config_.aeb_release_check_speed) ||
+    !finitePositive(config_.aeb_resume_acceleration) ||
+    !finiteNonnegative(config_.aeb_steering_recovery_max_speed) ||
+    !finitePositive(config_.aeb_steering_recovery_rate) ||
+    !finiteNonnegative(config_.aeb_steering_recovery_tolerance) ||
     !std::isfinite(config_.scan_min_valid_fraction) ||
     config_.scan_min_valid_fraction < 0.0 || config_.scan_min_valid_fraction > 1.0)
   {
@@ -102,15 +121,23 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
   }
 }
 
-void SafetyCore::updateState(double speed, double steering_angle, double now_seconds)
+void SafetyCore::updateState(
+  double speed, double steering_angle, double now_seconds,
+  bool steering_observed)
 {
   state_received_ = true;
   state_stamp_ = now_seconds;
-  state_valid_ = std::isfinite(speed) && std::isfinite(steering_angle) &&
+  state_valid_ = std::isfinite(speed) &&
+    (!steering_observed || std::isfinite(steering_angle)) &&
     std::isfinite(now_seconds);
   if (state_valid_) {
     current_speed_ = speed;
-    held_steering_angle_ = steering_angle;
+    if (steering_observed) {
+      measured_steering_angle_ = steering_angle;
+      estimated_effective_steering_angle_ = std::clamp(
+        steering_angle,
+        config_.min_command_steering, config_.max_command_steering);
+    }
   }
 }
 
@@ -155,12 +182,120 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
 
   const TimedCommand & selected_command = commandFor(selected_mode_);
   result.command_age = age(now_seconds, selected_command.stamp, selected_command.received);
-  result.aeb = assessAeb();
+
+  double elapsed = 0.0;
+  if (last_evaluation_time_.has_value() &&
+    std::isfinite(now_seconds) && now_seconds >= *last_evaluation_time_)
+  {
+    elapsed = now_seconds - *last_evaluation_time_;
+  }
+  estimated_effective_steering_angle_ = advanceEffectiveSteering(
+    estimated_effective_steering_angle_, output_steering_angle_,
+    current_speed_, elapsed);
+  const double aeb_steering_target =
+    selected_command.received && selected_command.command.valid() ?
+    std::clamp(
+    selected_command.command.steering_angle,
+    config_.min_command_steering, config_.max_command_steering) :
+    output_steering_angle_;
+  result.aeb = assessAeb(
+    current_speed_, aeb_steering_target, estimated_effective_steering_angle_);
+
+  const bool release_inputs_fresh =
+    state_valid_ && scan_valid_ &&
+    result.state_age <= config_.state_timeout &&
+    result.scan_age <= config_.scan_timeout &&
+    selected_command.received &&
+    result.command_age <= config_.command_timeout &&
+    selected_command.command.valid();
+  const bool was_latched = aeb_latched_;
+  if (result.aeb.emergency) {
+    aeb_latched_ = true;
+    aeb_resume_active_ = false;
+    aeb_clear_since_.reset();
+    aeb_resume_speed_limit_ = 0.0;
+    if (!was_latched) {
+      aeb_recovery_steering_angle_ = estimated_effective_steering_angle_;
+    }
+  }
+
+  bool recovery_active = false;
+  bool recovery_ready = false;
+  double recovery_target = measured_steering_angle_;
+  if (aeb_latched_ && release_inputs_fresh) {
+    recovery_target = std::clamp(
+      selected_command.command.steering_angle,
+      config_.min_command_steering, config_.max_command_steering);
+    if (!config_.aeb_steering_recovery_enabled) {
+      aeb_recovery_steering_angle_ = recovery_target;
+    } else if (
+      std::abs(current_speed_) <= config_.aeb_steering_recovery_max_speed)
+    {
+      recovery_active = true;
+      const double maximum_change =
+        config_.aeb_steering_recovery_rate * std::max(0.0, elapsed);
+      aeb_recovery_steering_angle_ += std::clamp(
+        recovery_target - aeb_recovery_steering_angle_,
+        -maximum_change, maximum_change);
+    } else if (std::abs(current_speed_) >
+      config_.aeb_steering_recovery_max_speed)
+    {
+      // During braking retain the measured curvature; do not ask the servo
+      // for an abrupt steering transient while lateral force is still high.
+      aeb_recovery_steering_angle_ = estimated_effective_steering_angle_;
+    }
+    aeb_recovery_steering_angle_ = std::clamp(
+      aeb_recovery_steering_angle_,
+      config_.min_command_steering, config_.max_command_steering);
+    recovery_ready = !config_.aeb_steering_recovery_enabled ||
+      std::abs(
+      estimated_effective_steering_angle_ -
+      effectiveSteeringTarget(recovery_target, current_speed_)) <=
+      config_.aeb_steering_recovery_tolerance;
+  }
+
+  if (!result.aeb.emergency && aeb_latched_) {
+    const double release_speed = release_inputs_fresh ?
+      std::max(
+      std::abs(current_speed_),
+      std::min(std::abs(selected_command.command.speed), config_.aeb_release_check_speed)) :
+      std::abs(current_speed_);
+    const double release_steering_command = release_inputs_fresh ?
+      aeb_recovery_steering_angle_ : measured_steering_angle_;
+    const AebAssessment release_assessment = assessAeb(
+      release_speed, release_steering_command,
+      estimated_effective_steering_angle_, config_.aeb_release_extra_distance);
+    if (!release_inputs_fresh || !recovery_ready || release_assessment.emergency) {
+      aeb_clear_since_.reset();
+    } else {
+      if (!aeb_clear_since_.has_value()) {
+        aeb_clear_since_ = now_seconds;
+      }
+      const double clear_duration = now_seconds - *aeb_clear_since_;
+      if (std::isfinite(clear_duration) &&
+        clear_duration >= config_.aeb_clear_hold_time)
+      {
+        aeb_latched_ = false;
+        aeb_resume_active_ = true;
+        aeb_resume_speed_limit_ = 0.0;
+        aeb_clear_since_.reset();
+      }
+    }
+  }
+  result.aeb_latched = aeb_latched_;
+  result.aeb_resume_active = aeb_resume_active_;
+  result.aeb_clear_duration = aeb_clear_since_.has_value() ?
+    std::max(0.0, now_seconds - *aeb_clear_since_) : 0.0;
+  result.aeb_resume_speed_limit = aeb_resume_speed_limit_;
+  result.aeb_steering_recovery_active = recovery_active;
+  result.aeb_steering_recovery_ready = recovery_ready;
+  result.aeb_steering_recovery_target = recovery_target;
+  result.estimated_effective_steering = estimated_effective_steering_angle_;
 
   // Physical and sensing hazards always override controller selection.
   if (scan_received_ && !scan_valid_) {
     result.stop_reason = StopReason::kInvalidScan;
-  } else if (result.aeb.emergency) {
+  } else if (aeb_latched_) {
     result.stop_reason = StopReason::kAeb;
   } else if (state_received_ && !state_valid_) {
     result.stop_reason = StopReason::kInvalidState;
@@ -184,12 +319,8 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
   }
 
   if (result.stopped()) {
-    result.command = stopCommand();
-    // Keep the measured steering while the vehicle is still moving so an
-    // emergency stop cannot introduce an abrupt lateral transient. Once
-    // stationary, center the wheels and update the latch so a noisy low-speed
-    // yaw-rate estimate cannot hold AEB on a stale curved sweep forever.
-    held_steering_angle_ = result.command.steering_angle;
+    result.command = stopCommand(result.stop_reason);
+    output_steering_angle_ = result.command.steering_angle;
   } else {
     result.command = selected_command.command;
     result.command.speed = std::clamp(
@@ -197,8 +328,27 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     result.command.steering_angle = std::clamp(
       result.command.steering_angle,
       config_.min_command_steering, config_.max_command_steering);
-    held_steering_angle_ = result.command.steering_angle;
+    if (aeb_resume_active_) {
+      aeb_resume_speed_limit_ = std::min(
+        config_.max_command_speed,
+        aeb_resume_speed_limit_ + config_.aeb_resume_acceleration * elapsed);
+      result.command.speed = std::min(result.command.speed, aeb_resume_speed_limit_);
+      result.aeb_resume_speed_limit = aeb_resume_speed_limit_;
+      // Do not end the ramp merely because the upstream controller happens
+      // to publish zero during the AEB braking transient. Keep the limiter
+      // active until it has traversed the configured command envelope, so a
+      // later full-speed command cannot bypass the release ramp.
+      if (aeb_resume_speed_limit_ >=
+        config_.max_command_speed - kCommandEnvelopeTolerance)
+      {
+        aeb_resume_active_ = false;
+        aeb_resume_speed_limit_ = std::numeric_limits<double>::infinity();
+      }
+      result.aeb_resume_active = aeb_resume_active_;
+    }
+    output_steering_angle_ = result.command.steering_angle;
   }
+  last_evaluation_time_ = now_seconds;
   return result;
 }
 
@@ -242,7 +392,59 @@ bool SafetyCore::scanStructurallyValid(
   return valid_fraction >= config_.scan_min_valid_fraction;
 }
 
-AebAssessment SafetyCore::assessAeb() const
+double SafetyCore::steeringEffectiveness(double speed) const
+{
+  const double squared_speed = std::isfinite(speed) ? speed * speed : 0.0;
+  return std::clamp(
+    config_.steering_effectiveness_at_zero_speed -
+    config_.steering_effectiveness_speed_squared * squared_speed,
+    config_.minimum_steering_effectiveness,
+    config_.steering_effectiveness_at_zero_speed);
+}
+
+double SafetyCore::effectiveSteeringTarget(
+  double steering_command, double speed) const
+{
+  if (!std::isfinite(steering_command)) {
+    return 0.0;
+  }
+  return std::clamp(
+    steeringEffectiveness(speed) * steering_command,
+    config_.min_command_steering, config_.max_command_steering);
+}
+
+double SafetyCore::effectiveSteeringRateLimit(double speed) const
+{
+  const double squared_speed = std::isfinite(speed) ? speed * speed : 0.0;
+  return 1.0 / (
+    1.0 + config_.effective_steering_rate_speed_coefficient * squared_speed);
+}
+
+double SafetyCore::advanceEffectiveSteering(
+  double steering, double steering_command, double speed, double elapsed) const
+{
+  if (!std::isfinite(steering) || !std::isfinite(elapsed) || elapsed <= 0.0) {
+    return std::clamp(
+      std::isfinite(steering) ? steering : 0.0,
+      config_.min_command_steering, config_.max_command_steering);
+  }
+  const double error = effectiveSteeringTarget(steering_command, speed) - steering;
+  const double scale = effectiveSteeringRateLimit(speed);
+  const double rate = std::clamp(
+    error / config_.steering_response_time,
+    config_.min_effective_steering_rate * scale,
+    config_.max_effective_steering_rate * scale);
+  const double requested_change = rate * elapsed;
+  const double bounded_change = std::clamp(
+    requested_change, std::min(0.0, error), std::max(0.0, error));
+  return std::clamp(
+    steering + bounded_change,
+    config_.min_command_steering, config_.max_command_steering);
+}
+
+AebAssessment SafetyCore::assessAeb(
+  double requested_speed, double steering_command,
+  double initial_effective_steering, double extra_distance) const
 {
   AebAssessment assessment;
   assessment.scan_valid = scan_received_ && scan_valid_;
@@ -251,18 +453,52 @@ AebAssessment SafetyCore::assessAeb() const
     return assessment;
   }
 
-  const double speed = std::abs(current_speed_);
+  const double speed = std::abs(requested_speed);
   assessment.sweep_distance = std::min(
     config_.aeb_max_sweep_distance,
     config_.aeb_reaction_time * speed +
     speed * speed / (2.0 * config_.aeb_max_deceleration) +
-    config_.aeb_extra_distance);
+    config_.aeb_extra_distance + extra_distance);
 
-  const double direction = current_speed_ < 0.0 ? -1.0 : 1.0;
-  const double curvature = std::tan(held_steering_angle_) / config_.wheelbase;
+  const double direction = requested_speed < 0.0 ? -1.0 : 1.0;
   const std::size_t sample_count = std::max<std::size_t>(
     1U, static_cast<std::size_t>(std::ceil(
       assessment.sweep_distance / config_.aeb_sweep_step)));
+  struct SweepPose
+  {
+    double x;
+    double y;
+    double yaw;
+    double distance;
+  };
+  std::vector<SweepPose> sweep;
+  sweep.reserve(sample_count + 1U);
+  sweep.push_back(SweepPose{0.0, 0.0, 0.0, 0.0});
+  const double step_distance = assessment.sweep_distance /
+    static_cast<double>(sample_count);
+  const double integration_speed = std::max(speed, 0.05);
+  double effective_steering = std::clamp(
+    initial_effective_steering,
+    config_.min_command_steering, config_.max_command_steering);
+  for (std::size_t sample = 1U; sample <= sample_count; ++sample) {
+    const SweepPose & previous = sweep.back();
+    const double elapsed = speed > 1.0e-6 ?
+      step_distance / integration_speed : 0.0;
+    const double next_effective_steering = advanceEffectiveSteering(
+      effective_steering, steering_command, requested_speed, elapsed);
+    const double mean_steering =
+      0.5 * (effective_steering + next_effective_steering);
+    const double curvature = std::tan(mean_steering) / config_.wheelbase;
+    const double signed_step = direction * step_distance;
+    const double yaw_step = curvature * signed_step;
+    const double middle_yaw = previous.yaw + 0.5 * yaw_step;
+    sweep.push_back(SweepPose{
+      previous.x + signed_step * std::cos(middle_yaw),
+      previous.y + signed_step * std::sin(middle_yaw),
+      previous.yaw + yaw_step,
+      step_distance * static_cast<double>(sample)});
+    effective_steering = next_effective_steering;
+  }
   const double front_overhang = config_.vehicle_length - config_.rear_overhang;
   const double min_x = -config_.rear_overhang - config_.footprint_margin;
   const double max_x = front_overhang + config_.footprint_margin;
@@ -295,30 +531,17 @@ AebAssessment SafetyCore::assessAeb() const
       continue;
     }
 
-    for (std::size_t sample = 0U; sample <= sample_count; ++sample) {
-      const double distance = assessment.sweep_distance *
-        static_cast<double>(sample) / static_cast<double>(sample_count);
-      const double signed_distance = direction * distance;
-
-      double path_x = signed_distance;
-      double path_y = 0.0;
-      double path_yaw = 0.0;
-      if (std::abs(curvature) > 1e-8) {
-        path_yaw = curvature * signed_distance;
-        path_x = std::sin(path_yaw) / curvature;
-        path_y = (1.0 - std::cos(path_yaw)) / curvature;
-      }
-
-      const double dx = point_x - path_x;
-      const double dy = point_y - path_y;
-      const double cosine = std::cos(path_yaw);
-      const double sine = std::sin(path_yaw);
+    for (const SweepPose & pose : sweep) {
+      const double dx = point_x - pose.x;
+      const double dy = point_y - pose.y;
+      const double cosine = std::cos(pose.yaw);
+      const double sine = std::sin(pose.yaw);
       const double local_x = cosine * dx + sine * dy;
       const double local_y = -sine * dx + cosine * dy;
       if (local_x >= min_x && local_x <= max_x && std::abs(local_y) <= max_abs_y) {
         assessment.emergency = true;
         assessment.collision_path_distance = std::min(
-          assessment.collision_path_distance, distance);
+          assessment.collision_path_distance, pose.distance);
         break;
       }
     }
@@ -326,10 +549,14 @@ AebAssessment SafetyCore::assessAeb() const
   return assessment;
 }
 
-DriveCommand SafetyCore::stopCommand() const
+DriveCommand SafetyCore::stopCommand(StopReason reason) const
 {
-  const double steering = std::abs(current_speed_) <=
-    config_.stop_steering_center_speed ? 0.0 : held_steering_angle_;
+  double steering = measured_steering_angle_;
+  if (reason == StopReason::kAeb && config_.aeb_steering_recovery_enabled) {
+    steering = aeb_recovery_steering_angle_;
+  } else if (std::abs(current_speed_) <= config_.stop_steering_center_speed) {
+    steering = 0.0;
+  }
   return DriveCommand{
     0.0,
     std::clamp(

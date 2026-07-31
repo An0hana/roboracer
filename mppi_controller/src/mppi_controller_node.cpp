@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -106,17 +107,23 @@ private:
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<std::string>("race_line_file", "");
     declare_parameter<std::string>("backend", "cuda");
-    declare_parameter<double>("control_frequency", 20.0);
+    declare_parameter<double>("control_frequency", 30.0);
     declare_parameter<double>("state_timeout", 0.10);
     declare_parameter<double>("costmap_timeout", 0.10);
-    declare_parameter<double>("costmap_processing_frequency", 20.0);
+    declare_parameter<double>("costmap_processing_frequency", 30.0);
     declare_parameter<double>("output_timeout", 0.10);
     declare_parameter<double>("tf_timeout", 0.02);
-    declare_parameter<double>("max_solve_time_ms", 40.0);
+    declare_parameter<double>("max_solve_time_ms", 25.0);
     declare_parameter<double>("localization_position_jump_threshold", 0.50);
     declare_parameter<double>("localization_yaw_jump_threshold", 0.70);
     declare_parameter<double>("localization_jump_hold_time", 0.50);
     declare_parameter<double>("measured_speed_tolerance", 0.15);
+    declare_parameter<double>("recovery.overspeed_entry_margin", 0.10);
+    declare_parameter<double>("recovery.overspeed_exit_margin", 0.03);
+    declare_parameter<double>("recovery.overspeed_exit_hold_time", 0.20);
+    declare_parameter<double>("recovery.overspeed_command_reduction", 0.10);
+    declare_parameter<double>("recovery.overspeed_proportional_gain", 0.50);
+    declare_parameter<double>("recovery.overspeed_command_deceleration", 1.50);
     declare_parameter<bool>("require_costmap", true);
     declare_parameter<int>("occupied_threshold", 50);
     declare_parameter<bool>("unknown_is_occupied", false);
@@ -131,8 +138,8 @@ private:
     declare_parameter<bool>("require_race_state", false);
 
     declare_parameter<int>("mppi.rollout_count", 2048);
-    declare_parameter<int>("mppi.horizon_steps", 48);
-    declare_parameter<double>("mppi.dt", 0.05);
+    declare_parameter<int>("mppi.horizon_steps", 72);
+    declare_parameter<double>("mppi.dt", 1.0 / 30.0);
     declare_parameter<double>("mppi.lambda", 1.0);
     declare_parameter<double>("mppi.steering_rate_stddev", 0.8);
     declare_parameter<double>("mppi.acceleration_stddev", 0.8);
@@ -158,6 +165,8 @@ private:
     declare_parameter<double>("mppi.initial_clearance_tolerance", 0.0);
     declare_parameter<int>("mppi.clearance_recovery_steps", 0);
     declare_parameter<double>("mppi.clearance_recovery_speed_threshold", 0.10);
+    declare_parameter<double>(
+      "mppi.clearance_recovery_acceleration_speed_threshold", 0.10);
     declare_parameter<int>("cuda.max_map_cells", 4 * 1024 * 1024);
 
     declare_parameter<double>("vehicle.wheelbase", 0.324);
@@ -169,6 +178,16 @@ private:
     declare_parameter<double>("vehicle.max_steering", 0.32);
     declare_parameter<double>("vehicle.min_steering_rate", -1.5);
     declare_parameter<double>("vehicle.max_steering_rate", 1.5);
+    declare_parameter<double>("vehicle.steering_response_time", 0.15);
+    declare_parameter<double>("vehicle.min_effective_steering_rate", -1.20);
+    declare_parameter<double>("vehicle.max_effective_steering_rate", 1.20);
+    declare_parameter<double>(
+      "vehicle.effective_steering_rate_speed_coefficient", 0.18);
+    declare_parameter<double>("vehicle.steering_effectiveness_at_zero_speed", 1.0);
+    declare_parameter<double>("vehicle.steering_effectiveness_speed_squared", 0.05);
+    declare_parameter<double>("vehicle.minimum_steering_effectiveness", 0.70);
+    declare_parameter<double>("steering_estimator.minimum_observation_speed", 0.50);
+    declare_parameter<double>("steering_estimator.observation_gain", 0.60);
     declare_parameter<double>("vehicle.min_acceleration", -1.5);
     declare_parameter<double>("vehicle.max_acceleration", 1.0);
     declare_parameter<double>("vehicle.min_speed", 0.0);
@@ -221,6 +240,32 @@ private:
       vehicle_.max_steering = parameter<double>("vehicle.max_steering");
       vehicle_.min_steering_rate = parameter<double>("vehicle.min_steering_rate");
       vehicle_.max_steering_rate = parameter<double>("vehicle.max_steering_rate");
+      vehicle_.steering_response_time =
+        parameter<double>("vehicle.steering_response_time");
+      vehicle_.min_effective_steering_rate =
+        parameter<double>("vehicle.min_effective_steering_rate");
+      vehicle_.max_effective_steering_rate =
+        parameter<double>("vehicle.max_effective_steering_rate");
+      vehicle_.effective_steering_rate_speed_coefficient =
+        parameter<double>("vehicle.effective_steering_rate_speed_coefficient");
+      vehicle_.steering_effectiveness_at_zero_speed =
+        parameter<double>("vehicle.steering_effectiveness_at_zero_speed");
+      vehicle_.steering_effectiveness_speed_squared =
+        parameter<double>("vehicle.steering_effectiveness_speed_squared");
+      vehicle_.minimum_steering_effectiveness =
+        parameter<double>("vehicle.minimum_steering_effectiveness");
+      steering_observation_min_speed_ =
+        parameter<double>("steering_estimator.minimum_observation_speed");
+      steering_observation_gain_ =
+        parameter<double>("steering_estimator.observation_gain");
+      if (!std::isfinite(steering_observation_min_speed_) ||
+        steering_observation_min_speed_ < 0.0 ||
+        !std::isfinite(steering_observation_gain_) ||
+        steering_observation_gain_ < 0.0 || steering_observation_gain_ > 1.0)
+      {
+        error = "invalid steering estimator configuration";
+        return false;
+      }
       vehicle_.min_acceleration = parameter<double>("vehicle.min_acceleration");
       vehicle_.max_acceleration = parameter<double>("vehicle.max_acceleration");
       vehicle_.min_speed = parameter<double>("vehicle.min_speed");
@@ -271,6 +316,8 @@ private:
         parameter<double>("mppi.initial_clearance_tolerance");
       mppi_.clearance_recovery_speed_threshold =
         parameter<double>("mppi.clearance_recovery_speed_threshold");
+      mppi_.clearance_recovery_acceleration_speed_threshold =
+        parameter<double>("mppi.clearance_recovery_acceleration_speed_threshold");
       mppi_.weights.lateral = parameter<double>("weights.lateral");
       mppi_.weights.heading = parameter<double>("weights.heading");
       mppi_.weights.lag = parameter<double>("weights.lag");
@@ -325,6 +372,22 @@ private:
       localization_yaw_jump_threshold_ = parameter<double>("localization_yaw_jump_threshold");
       localization_jump_hold_time_ = parameter<double>("localization_jump_hold_time");
       measured_speed_tolerance_ = parameter<double>("measured_speed_tolerance");
+      OverspeedRecoveryConfig overspeed_config;
+      overspeed_config.min_speed = vehicle_.min_speed;
+      overspeed_config.max_command_speed = vehicle_.max_speed;
+      overspeed_config.entry_margin =
+        parameter<double>("recovery.overspeed_entry_margin");
+      overspeed_config.exit_margin =
+        parameter<double>("recovery.overspeed_exit_margin");
+      overspeed_config.exit_hold_time =
+        parameter<double>("recovery.overspeed_exit_hold_time");
+      overspeed_config.command_reduction =
+        parameter<double>("recovery.overspeed_command_reduction");
+      overspeed_config.proportional_gain =
+        parameter<double>("recovery.overspeed_proportional_gain");
+      overspeed_config.command_deceleration =
+        parameter<double>("recovery.overspeed_command_deceleration");
+      overspeed_recovery_ = OverspeedRecovery(overspeed_config);
       require_costmap_ = parameter<bool>("require_costmap");
       occupied_threshold_ = parameter<int>("occupied_threshold");
       unknown_is_occupied_ = parameter<bool>("unknown_is_occupied");
@@ -412,8 +475,18 @@ private:
     backend_->reset();
     last_commanded_speed_ = 0.0;
     last_commanded_steering_ = 0.0;
+    last_commanded_steering_atomic_.store(0.0);
+    {
+      std::lock_guard<std::mutex> lock(steering_estimator_mutex_);
+      estimated_effective_steering_ = 0.0;
+      estimated_effective_steering_atomic_.store(0.0);
+      last_steering_estimator_stamp_.reset();
+      active_steering_measurement_ =
+        std::numeric_limits<double>::quiet_NaN();
+    }
     last_applied_control_ = Control{};
     last_command_time_.reset();
+    overspeed_recovery_.reset();
     rclcpp::SubscriptionOptions sensor_options;
     sensor_options.callback_group = sensor_callback_group_;
     rclcpp::SubscriptionOptions costmap_options;
@@ -460,6 +533,7 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     last_commanded_speed_ = 0.0;
+    overspeed_recovery_.reset();
     last_output_time_ = now();
     RCLCPP_INFO(get_logger(), "MPPI controller activated; output=%s", command_topic_.c_str());
     return CallbackReturn::SUCCESS;
@@ -548,7 +622,80 @@ private:
     // nav_msgs/Odometry twist is expressed in child_frame_id; preserve the signed
     // longitudinal velocity instead of turning reverse motion into positive speed.
     timed.state.speed = message->twist.twist.linear.x;
-    timed.state.steering = last_commanded_steering_;
+    const double steering_command = std::clamp(
+      last_commanded_steering_atomic_.load(),
+      vehicle_.min_steering, vehicle_.max_steering);
+    const double yaw_rate = message->twist.twist.angular.z;
+    {
+      std::lock_guard<std::mutex> estimator_lock(steering_estimator_mutex_);
+      if (!last_steering_estimator_stamp_.has_value()) {
+        estimated_effective_steering_ =
+          effectiveSteeringTarget(vehicle_, steering_command, timed.state.speed);
+      } else {
+        const double elapsed =
+          (source_stamp - *last_steering_estimator_stamp_).seconds();
+        if (std::isfinite(elapsed) && elapsed > 0.0 && elapsed <= 0.25) {
+          State estimator_state{
+            0.0, 0.0, 0.0, timed.state.speed,
+            estimated_effective_steering_, steering_command};
+          // The measured speed is deliberately kept unmodified in timed.state
+          // so the controller's overspeed recovery can observe the real value.
+          // The steering actuator model, however, requires a state inside the
+          // configured vehicle envelope.  A small physical overshoot above
+          // max_speed (full_lap_stop_go_04 reached 1.537 m/s for a 1.50 m/s
+          // limit) must therefore be tolerance-clamped before propagation.
+          // Previously this uncaught precondition violation terminated the
+          // entire lifecycle node from the odometry callback.
+          if (clampMeasuredSpeedWithinTolerance(
+              estimator_state, vehicle_, measured_speed_tolerance_))
+          {
+            try {
+              estimated_effective_steering_ = propagateState(
+                *model_, estimator_state, Control{}, elapsed, 0.01).steering;
+            } catch (const std::exception & exception) {
+              RCLCPP_ERROR_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Steering estimator propagation failed; resetting estimate: %s",
+                exception.what());
+              estimated_effective_steering_ = effectiveSteeringTarget(
+                vehicle_, steering_command, estimator_state.speed);
+            }
+          } else {
+            const double fallback_speed = std::isfinite(timed.state.speed) ?
+              std::clamp(
+              timed.state.speed, vehicle_.min_speed, vehicle_.max_speed) :
+              vehicle_.min_speed;
+            estimated_effective_steering_ = effectiveSteeringTarget(
+              vehicle_, steering_command, fallback_speed);
+            RCLCPP_WARN_THROTTLE(
+              get_logger(), *get_clock(), 1000,
+              "Skipping steering estimator propagation: measured speed %.3f m/s "
+              "is outside tolerated range [%.3f, %.3f] m/s",
+              timed.state.speed,
+              vehicle_.min_speed - measured_speed_tolerance_,
+              vehicle_.max_speed + measured_speed_tolerance_);
+          }
+        }
+      }
+      active_steering_measurement_ =
+        std::numeric_limits<double>::quiet_NaN();
+      if (std::isfinite(timed.state.speed) && std::isfinite(yaw_rate) &&
+        std::abs(timed.state.speed) >= steering_observation_min_speed_)
+      {
+        active_steering_measurement_ = std::clamp(
+          std::atan(vehicle_.wheelbase * yaw_rate / timed.state.speed),
+          vehicle_.min_steering, vehicle_.max_steering);
+        estimated_effective_steering_ += steering_observation_gain_ *
+          (active_steering_measurement_ - estimated_effective_steering_);
+      }
+      estimated_effective_steering_ = std::clamp(
+        estimated_effective_steering_,
+        vehicle_.min_steering, vehicle_.max_steering);
+      estimated_effective_steering_atomic_.store(estimated_effective_steering_);
+      last_steering_estimator_stamp_ = source_stamp;
+      timed.state.steering = estimated_effective_steering_;
+    }
+    timed.state.steering_command = steering_command;
     timed.stamp = source_stamp;
     timed.received = received;
     std::lock_guard<std::mutex> lock(data_mutex_);
@@ -762,6 +909,19 @@ private:
     MppiRequest request;
     request.initial_state = timed_state->state;
     active_measured_speed_ = request.initial_state.speed;
+    double command_dt = mppi_.dt;
+    if (last_command_time_.has_value()) {
+      const double elapsed = (tick_time - *last_command_time_).seconds();
+      if (std::isfinite(elapsed) && elapsed > 0.0) {
+        command_dt = std::min(elapsed, 2.0 * mppi_.dt);
+      }
+    }
+    const OverspeedRecoveryResult overspeed_result = overspeed_recovery_.update(
+      active_measured_speed_, last_commanded_speed_, command_dt);
+    active_overspeed_recovery_ = overspeed_result.active;
+    active_overspeed_command_limit_ = overspeed_result.command_limit;
+    active_overspeed_clear_duration_ = overspeed_result.clear_duration;
+    active_measured_overspeed_ = overspeed_result.measured_excess;
     if (clampMeasuredSpeedWithinTolerance(
         request.initial_state, vehicle_, measured_speed_tolerance_))
     {
@@ -955,13 +1115,6 @@ private:
       active_stuck_duration_ = 0.0;
     }
 
-    double command_dt = mppi_.dt;
-    if (last_command_time_.has_value()) {
-      const double elapsed = (tick_time - *last_command_time_).seconds();
-      if (std::isfinite(elapsed) && elapsed > 0.0) {
-        command_dt = std::min(elapsed, 2.0 * mppi_.dt);
-      }
-    }
     State commanded_state = model_->step(request.initial_state, result.control, command_dt);
     // The actuator consumes a velocity setpoint while MPPI optimizes
     // acceleration. Integrate the acceleration into a persistent setpoint;
@@ -970,17 +1123,29 @@ private:
     commanded_state.speed = std::clamp(
       last_commanded_speed_ + result.control.acceleration * command_dt,
       vehicle_.min_speed, vehicle_.max_speed);
-    publishCommand(commanded_state, result.control, tick_time);
+    Control applied_control = result.control;
+    std::string output_reason = result.reason;
+    if (overspeed_result.active) {
+      commanded_state.speed = std::min(
+        commanded_state.speed, overspeed_result.command_limit);
+      applied_control.acceleration = std::min(
+        applied_control.acceleration,
+        (commanded_state.speed - last_commanded_speed_) /
+        std::max(command_dt, 1.0e-6));
+      output_reason = "ok_overspeed_recovery";
+    }
+    publishCommand(commanded_state, applied_control, tick_time);
     publishPath(result.predicted_states, tick_time);
     publishDiagnostics(
-      result.reason,
+      output_reason,
       obstacles_stale ? diagnostic_msgs::msg::DiagnosticStatus::WARN :
       diagnostic_msgs::msg::DiagnosticStatus::OK,
       state_age, &result, costmap_age, request.exploration_scale,
       obstacle_age, request_obstacles.size(), obstacles_stale);
-    last_commanded_steering_ = commanded_state.steering;
+    last_commanded_steering_ = commanded_state.steering_command;
+    last_commanded_steering_atomic_.store(last_commanded_steering_);
     last_commanded_speed_ = commanded_state.speed;
-    last_applied_control_ = result.control;
+    last_applied_control_ = applied_control;
     last_command_time_ = tick_time;
     last_output_time_ = tick_time;
   }
@@ -1004,7 +1169,7 @@ private:
     ackermann_msgs::msg::AckermannDriveStamped command;
     command.header.stamp = stamp;
     command.header.frame_id = base_frame_;
-    command.drive.steering_angle = static_cast<float>(state.steering);
+    command.drive.steering_angle = static_cast<float>(state.steering_command);
     command.drive.steering_angle_velocity = static_cast<float>(control.steering_rate);
     command.drive.speed = static_cast<float>(state.speed);
     command.drive.acceleration = static_cast<float>(control.acceleration);
@@ -1019,7 +1184,8 @@ private:
   {
     const rclcpp::Time stamp = now();
     State stopped;
-    stopped.steering = last_commanded_steering_;
+    stopped.steering = estimated_effective_steering_atomic_.load();
+    stopped.steering_command = last_commanded_steering_;
     publishCommand(stopped, Control{0.0, vehicle_.min_acceleration}, stamp);
     last_commanded_speed_ = 0.0;
     last_applied_control_ = Control{0.0, vehicle_.min_acceleration};
@@ -1132,6 +1298,22 @@ private:
     status.values.push_back(diagnosticValue(
       "measured_speed", active_measured_speed_));
     status.values.push_back(diagnosticValue(
+      "estimated_effective_steering_rad",
+      estimated_effective_steering_atomic_.load()));
+    status.values.push_back(diagnosticValue(
+      "steering_command_target_rad",
+      last_commanded_steering_atomic_.load()));
+    diagnostic_msgs::msg::KeyValue overspeed_active;
+    overspeed_active.key = "overspeed_recovery_active";
+    overspeed_active.value = active_overspeed_recovery_ ? "true" : "false";
+    status.values.push_back(std::move(overspeed_active));
+    status.values.push_back(diagnosticValue(
+      "measured_overspeed_mps", active_measured_overspeed_));
+    status.values.push_back(diagnosticValue(
+      "overspeed_command_limit_mps", active_overspeed_command_limit_));
+    status.values.push_back(diagnosticValue(
+      "overspeed_clear_duration_s", active_overspeed_clear_duration_));
+    status.values.push_back(diagnosticValue(
       "recovery_speed_threshold", active_recovery_speed_threshold_));
     status.values.push_back(diagnosticValue(
       "recovery_stagnation_age_s", active_stuck_duration_));
@@ -1234,17 +1416,20 @@ private:
   std::string diagnostics_topic_;
   std::string map_frame_;
   std::string base_frame_;
-  double control_frequency_{20.0};
+  double control_frequency_{30.0};
   double state_timeout_{0.10};
   double costmap_timeout_{0.10};
-  double costmap_processing_frequency_{20.0};
+  double costmap_processing_frequency_{30.0};
   double output_timeout_{0.10};
   double tf_timeout_{0.02};
-  double max_solve_time_ms_{40.0};
+  double max_solve_time_ms_{25.0};
   double localization_position_jump_threshold_{0.50};
   double localization_yaw_jump_threshold_{0.70};
   double localization_jump_hold_time_{0.50};
   double measured_speed_tolerance_{0.15};
+  double steering_observation_min_speed_{0.50};
+  double steering_observation_gain_{0.60};
+  OverspeedRecovery overspeed_recovery_{};
   bool require_costmap_{true};
   int occupied_threshold_{50};
   bool unknown_is_occupied_{true};
@@ -1266,6 +1451,11 @@ private:
     std::numeric_limits<double>::quiet_NaN()};
   double active_measured_speed_{
     std::numeric_limits<double>::quiet_NaN()};
+  bool active_overspeed_recovery_{false};
+  double active_measured_overspeed_{0.0};
+  double active_overspeed_command_limit_{
+    std::numeric_limits<double>::infinity()};
+  double active_overspeed_clear_duration_{0.0};
   double active_stuck_duration_{0.0};
   MppiBehavior active_behavior_{};
   double active_race_state_age_{std::numeric_limits<double>::quiet_NaN()};
@@ -1277,6 +1467,7 @@ private:
 
   std::mutex data_mutex_;
   std::mutex costmap_callback_mutex_;
+  std::mutex steering_estimator_mutex_;
   std::optional<TimedState> latest_state_;
   std::optional<TimedDistanceField> latest_distance_field_;
   std::optional<TimedObstacles> latest_obstacles_;
@@ -1287,6 +1478,12 @@ private:
   std::optional<rclcpp::Time> last_stuck_recovery_time_;
   double last_commanded_speed_{0.0};
   double last_commanded_steering_{0.0};
+  std::atomic<double> last_commanded_steering_atomic_{0.0};
+  double estimated_effective_steering_{0.0};
+  std::atomic<double> estimated_effective_steering_atomic_{0.0};
+  double active_steering_measurement_{
+    std::numeric_limits<double>::quiet_NaN()};
+  std::optional<rclcpp::Time> last_steering_estimator_stamp_;
   Control last_applied_control_{};
   std::optional<rclcpp::Time> last_command_time_;
   rclcpp::Time last_output_time_{0, 0, RCL_ROS_TIME};

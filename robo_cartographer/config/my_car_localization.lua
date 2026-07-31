@@ -18,7 +18,7 @@ options = {
 
   map_frame = "map",
   tracking_frame = "gyro_link",
-
+  
   -- Same reasoning as the mapping config: no trusted wheel odometry yet,
   -- so Cartographer publishes map -> odom -> base_link itself.
   published_frame = "base_link",
@@ -64,8 +64,20 @@ TRAJECTORY_BUILDER.pure_localization_trimmer = {
   max_submaps_to_keep = 3,
 }
 
--- Optimize more often than while mapping. The graph is small here, and
--- faster optimization means the pose converges sooner after startup.
-POSE_GRAPH.optimize_every_n_nodes = 20
+-- The full_lap_stop_go_05 bag exposed false loop closures on the compact,
+-- visually repetitive track.  The defaults accepted scores down to 0.55 and
+-- searched up to 15 m, producing 1.37 m and 1.55 m pose jumps.  Keep global
+-- relocalization available, but only accept high-confidence matches and avoid
+-- building hundreds of weak constraints at every optimization.
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.05
+POSE_GRAPH.constraint_builder.max_constraint_distance = 1.0
+POSE_GRAPH.constraint_builder.min_score = 0.65
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.65
+POSE_GRAPH.global_sampling_ratio = 0.003
+POSE_GRAPH.optimize_every_n_nodes = 30
+
+-- This Jetson has six CPU cores available to Cartographer's Ceres build.
+-- The upstream default of seven is silently clipped and emits a warning.
+POSE_GRAPH.optimization_problem.ceres_solver_options.num_threads = 6
 
 return options
