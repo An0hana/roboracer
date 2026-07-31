@@ -1085,21 +1085,18 @@ private:
       // though the vehicle is physically safe (the user can push it through).
       // A hard stop turns a marginal clearance into a permanent deadlock.
       {
-        // Creep forward: keep the last steering, apply gentle acceleration.
+        // Creep forward: keep the last steering, command recovery speed
+        // directly without integration so the motor sees a consistent
+        // setpoint above its static-friction deadzone.
         State recovery_state = request.initial_state;
         recovery_state.steering_command = last_commanded_steering_;
-        recovery_state.speed = std::min(
-          last_commanded_speed_ + kRecoveryAcceleration * command_dt,
-          kRecoveryMaxSpeed);
+        recovery_state.speed = kRecoveryMaxSpeed;
         Control recovery_control{
           std::clamp(
             (recovery_state.steering_command - request.initial_state.steering_command) /
             std::max(command_dt, 1.0e-6),
             vehicle_.min_steering_rate, vehicle_.max_steering_rate),
-          std::clamp(
-            (recovery_state.speed - last_commanded_speed_) /
-            std::max(command_dt, 1.0e-6),
-            vehicle_.min_acceleration, vehicle_.max_acceleration)};
+          kRecoveryAcceleration};
         publishCommand(recovery_state, recovery_control, tick_time);
         publishDiagnostics(
           "solver_failure_recovery",

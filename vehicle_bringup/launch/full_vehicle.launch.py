@@ -387,7 +387,7 @@ def generate_launch_description():
         DeclareLaunchArgument("base_frame", default_value="base_link"),
         DeclareLaunchArgument(
             "max_speed",
-            default_value="1.5",
+            default_value="3.7",
             description="Hard speed limit shared by MPPI and safety controller [m/s]",
         ),
         DeclareLaunchArgument("min_steering", default_value="-0.32"),
