@@ -62,7 +62,10 @@ safety_controller:
     # Swept-rectangle AEB distance = reaction*v + v^2/(2*decel) + extra.
     aeb_reaction_time: 0.100
     aeb_max_deceleration: 3.0
-    aeb_extra_distance: 0.150
+    # Keep the fixed margin small so low-speed creep (0.30 m/s) can pass
+    # through narrow corridors.  The speed-dependent braking term still
+    # dominates at racing pace.
+    aeb_extra_distance: 0.050
     aeb_max_sweep_distance: 3.0
     aeb_sweep_step: 0.050
     # Trigger immediately, but require a larger candidate-command corridor to
