@@ -74,7 +74,7 @@ safety_controller:
     # Hard upper bound on AEB latch duration.  A false-positive trigger in a
     # narrow corridor can otherwise persist indefinitely.  After this timeout
     # the latch is force-cleared even if the release assessment would object.
-    aeb_max_latch_duration: 5.0
+    aeb_max_latch_duration: 3.0
     # Once released, ramp the final velocity setpoint instead of jumping from
     # zero straight back to the upstream controller's command.
     aeb_resume_acceleration: 1.000
@@ -84,6 +84,10 @@ safety_controller:
     # 0.20 s hold time.
     aeb_steering_recovery_enabled: true
     aeb_steering_recovery_max_speed: 0.100
-    aeb_steering_recovery_rate: 0.800
-    aeb_steering_recovery_tolerance: 0.020
+    # The controller updates its steering command at 30 Hz; at 0.8 rad/s the
+    # recovery lag is ~0.2 s.  A tighter tolerance than the command step size
+    # prevents convergence in practice because the target moves faster than
+    # the recovery can track.
+    aeb_steering_recovery_rate: 1.200
+    aeb_steering_recovery_tolerance: 0.050
     scan_min_valid_fraction: 0.50
