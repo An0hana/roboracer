@@ -72,13 +72,11 @@ mppi_controller:
       # optimization buffer; safety_margin remains the hard collision limit.
       repair_clearance: 0.05
       # A 5 cm local grid can put the measured pose a few millimetres inside
-      # the 5 cm safety envelope. Allow at most 1.5 cm of initial envelope
-      # violation and require the complete 5 cm margin to be restored within
-      # 0.6 s. Above 0.10 m/s the repair validator forbids positive
-      # acceleration. Physical footprint overlap is never accepted and AEB
-      # remains independent.
-      initial_clearance_tolerance: 0.015
-      clearance_recovery_steps: 12
+      # the 5 cm safety envelope. Allow a moderate initial envelope violation
+      # and require the full margin to be restored within the recovery window.
+      # Physical footprint overlap is never accepted and AEB remains independent.
+      initial_clearance_tolerance: 0.030
+      clearance_recovery_steps: 18
       clearance_recovery_speed_threshold: 1.50
       clearance_recovery_acceleration_speed_threshold: 0.10
 

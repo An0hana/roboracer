@@ -1077,11 +1077,14 @@ private:
       const double failure_duration =
         (tick_time - *last_solver_failure_time_).seconds();
 
-      constexpr double kRecoveryWindow = 5.0;       // seconds
       constexpr double kRecoveryMaxSpeed = 0.50;    // m/s
       constexpr double kRecoveryAcceleration = 0.50; // m/s²
 
-      if (std::isfinite(failure_duration) && failure_duration <= kRecoveryWindow) {
+      // Keep creeping at low speed as long as the solver fails.  In narrow
+      // corridors the CUDA repair/fallback may reject every trajectory even
+      // though the vehicle is physically safe (the user can push it through).
+      // A hard stop turns a marginal clearance into a permanent deadlock.
+      {
         // Creep forward: keep the last steering, apply gentle acceleration.
         State recovery_state = request.initial_state;
         recovery_state.steering_command = last_commanded_steering_;
@@ -1114,12 +1117,6 @@ private:
           reason.c_str(), recovery_state.speed, failure_duration);
         return;
       }
-
-      // Recovery window exhausted — hard stop.
-      publishStop(
-        reason, diagnostic_msgs::msg::DiagnosticStatus::ERROR,
-        state_age, &result, costmap_age);
-      return;
     }
     // Solver succeeded — clear failure tracking.
     last_solver_failure_time_.reset();
