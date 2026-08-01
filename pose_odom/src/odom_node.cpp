@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace pose_odom
 {
@@ -13,6 +14,11 @@ double yawFromQuat(double z, double w)
 {
     // Planar: roll = pitch = 0, so yaw = 2*atan2(z, w).
     return 2.0 * std::atan2(z, w);
+}
+
+double wrapAngle(double angle)
+{
+    return std::atan2(std::sin(angle), std::cos(angle));
 }
 
 } // namespace
@@ -59,8 +65,35 @@ void OdomNode::loadParameters()
 
     params_.publish_rate =
         declare_parameter("publish_rate", params_.publish_rate);
+    params_.filter_pose_jumps =
+        declare_parameter("filter_pose_jumps", params_.filter_pose_jumps);
+    params_.pose_step_slack =
+        declare_parameter("pose_step_slack", params_.pose_step_slack);
+    params_.max_pose_step_speed =
+        declare_parameter("max_pose_step_speed", params_.max_pose_step_speed);
+    params_.yaw_step_slack =
+        declare_parameter("yaw_step_slack", params_.yaw_step_slack);
+    params_.max_yaw_step_rate =
+        declare_parameter("max_yaw_step_rate", params_.max_yaw_step_rate);
+    params_.correction_linear_rate =
+        declare_parameter("correction_linear_rate", params_.correction_linear_rate);
+    params_.correction_angular_rate =
+        declare_parameter("correction_angular_rate", params_.correction_angular_rate);
+    params_.max_filter_dt =
+        declare_parameter("max_filter_dt", params_.max_filter_dt);
     params_.log_calibration =
         declare_parameter("log_calibration", params_.log_calibration);
+
+    if (params_.pose_step_slack < 0.0 ||
+        params_.max_pose_step_speed <= 0.0 ||
+        params_.yaw_step_slack < 0.0 ||
+        params_.max_yaw_step_rate <= 0.0 ||
+        params_.correction_linear_rate < 0.0 ||
+        params_.correction_angular_rate < 0.0 ||
+        params_.max_filter_dt <= 0.0)
+    {
+        throw std::invalid_argument("invalid pose jump filter parameters");
+    }
 
     params_.position_variance =
         declare_parameter("position_variance", params_.position_variance);
@@ -103,20 +136,90 @@ void OdomNode::poseCallback(
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    qz_ = msg->pose.orientation.z;
-    qw_ = msg->pose.orientation.w;
-    yaw_ = yawFromQuat(qz_, qw_);
+    const double raw_yaw = yawFromQuat(
+        msg->pose.orientation.z, msg->pose.orientation.w);
     // /tracked_pose is the pose of Cartographer's tracking_frame. Convert it
     // to the rear-axle base_link origin before publishing controller state.
-    x_ = msg->pose.position.x -
-         std::cos(yaw_) * params_.tracking_offset_x +
-         std::sin(yaw_) * params_.tracking_offset_y;
-    y_ = msg->pose.position.y -
-         std::sin(yaw_) * params_.tracking_offset_x -
-         std::cos(yaw_) * params_.tracking_offset_y;
-    have_pose_ = true;
+    const double raw_x = msg->pose.position.x -
+         std::cos(raw_yaw) * params_.tracking_offset_x +
+         std::sin(raw_yaw) * params_.tracking_offset_y;
+    const double raw_y = msg->pose.position.y -
+         std::sin(raw_yaw) * params_.tracking_offset_x -
+         std::cos(raw_yaw) * params_.tracking_offset_y;
 
     const rclcpp::Time stamp(msg->header.stamp);
+
+    if (!params_.filter_pose_jumps || !have_raw_pose_)
+    {
+        x_ = raw_x;
+        y_ = raw_y;
+        yaw_ = raw_yaw;
+    }
+    else
+    {
+        const double dt = (stamp - last_raw_pose_stamp_).seconds();
+        if (std::isfinite(dt) && dt > 0.0 && dt <= params_.max_filter_dt)
+        {
+            const double raw_dx = raw_x - last_raw_x_;
+            const double raw_dy = raw_y - last_raw_y_;
+            const double raw_distance = std::hypot(raw_dx, raw_dy);
+            const double raw_dyaw = wrapAngle(raw_yaw - last_raw_yaw_);
+            const double allowed_distance =
+                params_.pose_step_slack + params_.max_pose_step_speed * dt;
+            const double allowed_yaw =
+                params_.yaw_step_slack + params_.max_yaw_step_rate * dt;
+            const bool plausible_increment =
+                raw_distance <= allowed_distance &&
+                std::abs(raw_dyaw) <= allowed_yaw;
+
+            if (plausible_increment)
+            {
+                x_ += raw_dx;
+                y_ += raw_dy;
+                yaw_ = wrapAngle(yaw_ + raw_dyaw);
+            }
+            else
+            {
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 1000,
+                    "Suppressing Cartographer pose jump: "
+                    "translation=%.3f m (limit %.3f), yaw=%.3f rad (limit %.3f)",
+                    raw_distance, allowed_distance, std::abs(raw_dyaw), allowed_yaw);
+            }
+
+            // Preserve continuity, then converge gently to Cartographer's map
+            // correction. This prevents a pose-graph optimization from
+            // teleporting both the controller state and local obstacle map.
+            const double error_x = raw_x - x_;
+            const double error_y = raw_y - y_;
+            const double error_norm = std::hypot(error_x, error_y);
+            const double max_correction = params_.correction_linear_rate * dt;
+            if (error_norm > 0.0 && max_correction > 0.0)
+            {
+                const double scale = std::min(1.0, max_correction / error_norm);
+                x_ += scale * error_x;
+                y_ += scale * error_y;
+            }
+            const double yaw_error = wrapAngle(raw_yaw - yaw_);
+            const double max_yaw_correction =
+                params_.correction_angular_rate * dt;
+            yaw_ = wrapAngle(
+                yaw_ + std::clamp(
+                    yaw_error, -max_yaw_correction, max_yaw_correction));
+        }
+        // If timestamps regress or stall, keep the last continuous output and
+        // rebase the raw sample below. The next valid increment resumes it.
+    }
+
+    qz_ = std::sin(0.5 * yaw_);
+    qw_ = std::cos(0.5 * yaw_);
+    have_pose_ = true;
+    last_raw_x_ = raw_x;
+    last_raw_y_ = raw_y;
+    last_raw_yaw_ = raw_yaw;
+    last_raw_pose_stamp_ = stamp;
+    have_raw_pose_ = true;
+
     estimator_.updatePose(x_, y_, yaw_, stamp.seconds());
 
     if (params_.log_calibration)

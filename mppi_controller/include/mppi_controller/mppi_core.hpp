@@ -24,7 +24,26 @@ struct State
   double y{0.0};
   double yaw{0.0};
   double speed{0.0};
+  // Effective bicycle steering inferred from the vehicle's realised
+  // curvature. This is the state used by yaw dynamics and safety validation.
   double steering{0.0};
+  // Actuator target sent to the steering servo. It is deliberately separate
+  // from effective steering because the real mechanism and tyre response lag.
+  double steering_command{0.0};
+
+  State() = default;
+  State(double x_in, double y_in, double yaw_in, double speed_in, double steering_in)
+  : x(x_in), y(y_in), yaw(yaw_in), speed(speed_in),
+    steering(steering_in), steering_command(steering_in)
+  {
+  }
+  State(
+    double x_in, double y_in, double yaw_in, double speed_in,
+    double steering_in, double steering_command_in)
+  : x(x_in), y(y_in), yaw(yaw_in), speed(speed_in),
+    steering(steering_in), steering_command(steering_command_in)
+  {
+  }
 };
 
 struct Control
@@ -46,11 +65,29 @@ struct VehicleConfig
   double max_steering{0.32};
   double min_steering_rate{-1.5};
   double max_steering_rate{1.5};
+  // Identified steering actuator/tyre model. The command can move at the
+  // steering-rate bounds above, while effective steering follows with a
+  // slower first-order, speed-dependent response.
+  double steering_response_time{0.15};
+  double min_effective_steering_rate{-1.20};
+  double max_effective_steering_rate{1.20};
+  double effective_steering_rate_speed_coefficient{0.18};
+  double steering_effectiveness_at_zero_speed{1.0};
+  double steering_effectiveness_speed_squared{0.05};
+  double minimum_steering_effectiveness{0.70};
   double min_acceleration{-1.5};
   double max_acceleration{1.0};
   double min_speed{0.0};
   double max_speed{2.0};
+  double max_lateral_acceleration{6.0};
 };
+
+[[nodiscard]] double steeringEffectiveness(
+  const VehicleConfig & vehicle, double speed) noexcept;
+[[nodiscard]] double effectiveSteeringTarget(
+  const VehicleConfig & vehicle, double steering_command, double speed) noexcept;
+[[nodiscard]] double effectiveSteeringRateLimit(
+  const VehicleConfig & vehicle, double speed, bool positive) noexcept;
 
 class BicycleModel
 {
@@ -71,6 +108,45 @@ private:
   const State & state, const VehicleConfig & vehicle) noexcept;
 [[nodiscard]] bool clampMeasuredSpeedWithinTolerance(
   State & state, const VehicleConfig & vehicle, double speed_tolerance) noexcept;
+
+struct OverspeedRecoveryConfig
+{
+  double min_speed{0.0};
+  double max_command_speed{2.0};
+  double entry_margin{0.10};
+  double exit_margin{0.03};
+  double exit_hold_time{0.20};
+  double command_reduction{0.10};
+  double proportional_gain{0.50};
+  double command_deceleration{1.50};
+};
+
+struct OverspeedRecoveryResult
+{
+  bool active{false};
+  double command_limit{std::numeric_limits<double>::infinity()};
+  double clear_duration{0.0};
+  double measured_excess{0.0};
+};
+
+/// Hysteretic limiter for a measured speed above the desired command cap.
+/// It preserves steering/path planning and lowers only the velocity setpoint;
+/// gross measurement errors remain governed by the independent hard tolerance.
+class OverspeedRecovery
+{
+public:
+  explicit OverspeedRecovery(OverspeedRecoveryConfig config = {});
+
+  void reset() noexcept;
+  [[nodiscard]] OverspeedRecoveryResult update(
+    double measured_speed, double previous_command_speed, double dt) noexcept;
+
+private:
+  OverspeedRecoveryConfig config_;
+  bool active_{false};
+  double clear_duration_{0.0};
+};
+
 [[nodiscard]] State propagateState(
   const BicycleModel & model, const State & state, const Control & applied_control,
   double duration, double maximum_step = 0.01);
@@ -229,8 +305,8 @@ struct CostBreakdown
 struct MppiConfig
 {
   std::size_t rollout_count{2048U};
-  std::size_t horizon_steps{48U};
-  double dt{0.05};
+  std::size_t horizon_steps{72U};
+  double dt{1.0 / 30.0};
   double lambda{1.0};
   double steering_rate_stddev{0.8};
   double acceleration_stddev{0.8};
@@ -246,12 +322,14 @@ struct MppiConfig
   std::size_t repair_iterations{2U};
   double repair_budget_ms{3.0};
   double repair_clearance{0.05};
-  // A stopped vehicle can be a few millimetres inside the configured safety
+  // A measured vehicle can be a few millimetres inside the configured safety
   // envelope because the local grid is discrete. Permit only a short,
-  // non-worsening trajectory that restores the full margin.
+  // non-worsening trajectory that restores the full margin. Once moving above
+  // the acceleration threshold, recovery must not command positive acceleration.
   double initial_clearance_tolerance{0.0};
   std::size_t clearance_recovery_steps{0U};
   double clearance_recovery_speed_threshold{0.10};
+  double clearance_recovery_acceleration_speed_threshold{0.10};
   // CUDA backend allocates this capacity once during warmup. It never grows
   // the device buffer from the control or map callback paths.
   std::size_t cuda_max_map_cells{4U * 1024U * 1024U};

@@ -66,6 +66,33 @@ TEST(BicycleModel, Rk4IntegratesStraightAndCurvedMotion)
   EXPECT_NEAR(left.yaw, -right.yaw, 1.0e-12);
 }
 
+TEST(BicycleModel, SeparatesServoTargetFromEffectiveSteeringResponse)
+{
+  VehicleConfig config;
+  config.steering_response_time = 0.15;
+  config.min_effective_steering_rate = -1.20;
+  config.max_effective_steering_rate = 1.20;
+  config.effective_steering_rate_speed_coefficient = 0.18;
+  config.steering_effectiveness_speed_squared = 0.05;
+  BicycleModel model(config);
+
+  const State initial{0.0, 0.0, 0.0, 2.0, 0.0, 0.0};
+  const State first = model.step(
+    initial, Control{config.max_steering_rate, 0.0}, 0.05);
+  EXPECT_NEAR(first.steering_command, 0.075, 1e-12);
+  EXPECT_GT(first.steering, 0.0);
+  EXPECT_LT(first.steering, first.steering_command);
+
+  State settled{0.0, 0.0, 0.0, 2.0, 0.0, 0.20};
+  for (int step = 0; step < 100; ++step) {
+    settled = model.step(settled, Control{}, 0.02);
+  }
+  EXPECT_NEAR(
+    settled.steering,
+    effectiveSteeringTarget(config, 0.20, 2.0), 1e-5);
+  EXPECT_NEAR(settled.steering_command, 0.20, 1e-12);
+}
+
 TEST(BicycleModel, EnforcesAsymmetricSteeringAndControlLimits)
 {
   VehicleConfig config;
@@ -265,14 +292,16 @@ TEST(Cost, TreatsRepairClearanceAsSoftBufferBeyondHardSafetyMargin)
       state, recovery_controls, track, &field, deadline));
 }
 
-TEST(Cost, AllowsOnlyLowSpeedClearanceRecoveryThatRestoresHardMargin)
+TEST(Cost, MovingClearanceRecoveryMustDecelerateAndRestoreHardMargin)
 {
   const RaceLine track = makeCircle(false, 2.0);
   MppiConfig config = fastConfig();
   config.horizon_steps = 24U;
+  config.dt = 0.05;
   config.initial_clearance_tolerance = 0.015;
   config.clearance_recovery_steps = 12U;
-  config.clearance_recovery_speed_threshold = 0.10;
+  config.clearance_recovery_speed_threshold = 1.50;
+  config.clearance_recovery_acceleration_speed_threshold = 0.10;
   const VehicleConfig vehicle;
   CpuMppiBackend backend(config, vehicle);
 
@@ -306,12 +335,29 @@ TEST(Cost, AllowsOnlyLowSpeedClearanceRecoveryThatRestoresHardMargin)
     initial, departing, track, nullptr, nullptr, &obstacles);
   EXPECT_EQ(departing_cost.collision, 0.0);
 
-  // The same envelope violation is never relaxed while the vehicle is moving.
+  // Once moving, an otherwise geometrically valid recovery may not accelerate.
   State moving = initial;
-  moving.speed = config.clearance_recovery_speed_threshold + 0.01;
-  const CostBreakdown moving_cost = backend.evaluateTrajectory(
+  moving.speed = 0.80;
+  const CostBreakdown accelerating_moving_cost = backend.evaluateTrajectory(
     moving, departing, track, nullptr, nullptr, &obstacles);
-  EXPECT_GT(moving_cost.collision, 0.0);
+  EXPECT_GT(accelerating_moving_cost.collision, 0.0);
+
+  // A deterministic braking sequence is accepted only when its predicted
+  // footprint monotonically leaves the soft-envelope violation.
+  std::vector<Control> braking(
+    config.horizon_steps, Control{0.0, vehicle.min_acceleration});
+  const CostBreakdown braking_cost = backend.evaluateTrajectory(
+    moving, braking, track, nullptr, nullptr, &obstacles);
+  EXPECT_EQ(braking_cost.collision, 0.0);
+
+  // The repair stage strips positive acceleration from moving recovery steps.
+  std::vector<Control> repaired(
+    config.horizon_steps, Control{0.0, vehicle.max_acceleration});
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+  EXPECT_TRUE(backend.repairControls(
+      moving, repaired, track, nullptr, deadline, &obstacles));
+  EXPECT_LE(repaired.front().acceleration, 0.0);
 }
 
 TEST(Cost, ClampsRaceLineSpeedToConfiguredVehicleMaximum)
@@ -529,6 +575,64 @@ TEST(BicycleModel, ClampsOnlySmallMeasuredSpeedBoundaryOvershoot)
   EXPECT_FALSE(clampMeasuredSpeedWithinTolerance(state, vehicle, 0.25));
 }
 
+TEST(BicycleModel, RecordedSpeedOvershootCanBePropagatedAfterToleranceClamp)
+{
+  VehicleConfig vehicle;
+  vehicle.max_speed = 1.50;
+  const BicycleModel model(vehicle);
+  State estimator_state{0.0, 0.0, 0.0, 1.537479, 0.02, 0.05};
+
+  ASSERT_TRUE(clampMeasuredSpeedWithinTolerance(estimator_state, vehicle, 0.50));
+  EXPECT_DOUBLE_EQ(estimator_state.speed, 1.50);
+  EXPECT_NO_THROW({
+    const State propagated =
+      propagateState(model, estimator_state, Control{}, 0.025, 0.01);
+    EXPECT_TRUE(stateWithinLimits(propagated, vehicle));
+  });
+}
+
+TEST(OverspeedRecovery, UsesHysteresisAndRateLimitedVelocityReduction)
+{
+  OverspeedRecoveryConfig config;
+  config.max_command_speed = 1.50;
+  config.entry_margin = 0.10;
+  config.exit_margin = 0.03;
+  config.exit_hold_time = 0.20;
+  config.command_reduction = 0.10;
+  config.proportional_gain = 0.50;
+  config.command_deceleration = 1.50;
+  OverspeedRecovery recovery(config);
+
+  const OverspeedRecoveryResult normal = recovery.update(1.55, 1.50, 0.05);
+  EXPECT_FALSE(normal.active);
+  EXPECT_TRUE(std::isinf(normal.command_limit));
+
+  const OverspeedRecoveryResult entered = recovery.update(1.77, 1.50, 0.05);
+  ASSERT_TRUE(entered.active);
+  EXPECT_NEAR(entered.measured_excess, 0.27, 1.0e-12);
+  EXPECT_NEAR(entered.command_limit, 1.425, 1.0e-12);
+
+  const OverspeedRecoveryResult middle = recovery.update(1.56, 1.425, 0.05);
+  EXPECT_TRUE(middle.active);
+  EXPECT_DOUBLE_EQ(middle.clear_duration, 0.0);
+
+  EXPECT_TRUE(recovery.update(1.52, 1.35, 0.10).active);
+  const OverspeedRecoveryResult exited = recovery.update(1.51, 1.30, 0.10);
+  EXPECT_FALSE(exited.active);
+  EXPECT_TRUE(std::isinf(exited.command_limit));
+}
+
+TEST(OverspeedRecovery, InvalidMeasurementResetsRecovery)
+{
+  OverspeedRecoveryConfig config;
+  config.max_command_speed = 1.50;
+  OverspeedRecovery recovery(config);
+  ASSERT_TRUE(recovery.update(1.70, 1.50, 0.05).active);
+  EXPECT_FALSE(
+    recovery.update(std::numeric_limits<double>::quiet_NaN(), 1.40, 0.05).active);
+  EXPECT_FALSE(recovery.update(1.50, 1.40, 0.05).active);
+}
+
 TEST(MppiBackend, RejectsInvalidExplorationScale)
 {
   const RaceLine track = makeCircle();
@@ -736,7 +840,7 @@ TEST(CudaMppi, AvoidsObstaclesWithCpuValidatedSafety)
     // launch, so this must be a skip, not a runtime failure path.
     GTEST_SKIP() << "no CUDA device matching the compiled architecture";
   }
-  MppiConfig config;  // Defaults match the compiled 2048 x 48 CUDA shape.
+  MppiConfig config;  // Defaults match the compiled 2048 x 72 CUDA shape.
   config.random_seed = 42U;
   std::unique_ptr<MppiBackend> backend;
   try {
@@ -773,6 +877,8 @@ TEST(CudaMppi, AvoidsObstaclesWithCpuValidatedSafety)
   // braking fallback: near-zero progress and a fallback reason.
   EXPECT_EQ(result.reason, "ok");
   EXPECT_GT(result.metrics.forward_progress, 0.3);
+  RecordProperty("solve_time_ms", result.solve_time_ms);
+  EXPECT_LT(result.solve_time_ms, 25.0);
 }
 
 TEST(MppiBehavior, ScalesSpeedAndOffsetsRaceLineWithoutAnotherWeightSet)

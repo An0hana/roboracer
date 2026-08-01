@@ -37,6 +37,18 @@ private:
 
         double publish_rate{50.0};       ///< [Hz] 0 = publish on every pose
 
+        // Cartographer may apply a pose-graph correction in one update. Feed
+        // the controller a continuous pose and converge to that correction at
+        // a bounded rate instead of exposing a metre-scale state teleport.
+        bool filter_pose_jumps{true};
+        double pose_step_slack{0.05};     ///< [m] timestamp/scan-match allowance
+        double max_pose_step_speed{3.0};  ///< [m/s] plausible local motion
+        double yaw_step_slack{0.10};      ///< [rad]
+        double max_yaw_step_rate{3.0};    ///< [rad/s]
+        double correction_linear_rate{0.35}; ///< [m/s]
+        double correction_angular_rate{0.60};///< [rad/s]
+        double max_filter_dt{0.10};       ///< [s]
+
         // Set to output a direct ERPM->speed calibration log line. Drive a
         // steady speed and read the suggested gain from the console.
         bool log_calibration{false};
@@ -62,6 +74,10 @@ private:
     double x_{0.0}, y_{0.0}, yaw_{0.0};
     double qz_{0.0}, qw_{1.0};
     bool   have_pose_{false};
+
+    double last_raw_x_{0.0}, last_raw_y_{0.0}, last_raw_yaw_{0.0};
+    rclcpp::Time last_raw_pose_stamp_;
+    bool have_raw_pose_{false};
 
     rclcpp::Time last_publish_;
     bool         have_published_{false};

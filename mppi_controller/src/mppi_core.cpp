@@ -106,6 +106,8 @@ State addScaled(const State & state, const State & derivative, double scale)
   result.yaw = state.yaw + derivative.yaw * scale;
   result.speed = state.speed + derivative.speed * scale;
   result.steering = state.steering + derivative.steering * scale;
+  result.steering_command =
+    state.steering_command + derivative.steering_command * scale;
   return result;
 }
 
@@ -219,6 +221,38 @@ double normalizeAngle(double angle)
   return std::atan2(std::sin(angle), std::cos(angle));
 }
 
+double steeringEffectiveness(const VehicleConfig & vehicle, double speed) noexcept
+{
+  const double squared_speed = finite(speed) ? speed * speed : 0.0;
+  return std::clamp(
+    vehicle.steering_effectiveness_at_zero_speed -
+    vehicle.steering_effectiveness_speed_squared * squared_speed,
+    vehicle.minimum_steering_effectiveness,
+    vehicle.steering_effectiveness_at_zero_speed);
+}
+
+double effectiveSteeringTarget(
+  const VehicleConfig & vehicle, double steering_command, double speed) noexcept
+{
+  if (!finite(steering_command)) {
+    return 0.0;
+  }
+  return std::clamp(
+    steeringEffectiveness(vehicle, speed) * steering_command,
+    vehicle.min_steering, vehicle.max_steering);
+}
+
+double effectiveSteeringRateLimit(
+  const VehicleConfig & vehicle, double speed, bool positive) noexcept
+{
+  const double base = positive ?
+    vehicle.max_effective_steering_rate :
+    -vehicle.min_effective_steering_rate;
+  const double squared_speed = finite(speed) ? speed * speed : 0.0;
+  return base / (
+    1.0 + vehicle.effective_steering_rate_speed_coefficient * squared_speed);
+}
+
 BicycleModel::BicycleModel(VehicleConfig config)
 : config_(std::move(config))
 {
@@ -232,9 +266,15 @@ BicycleModel::BicycleModel(VehicleConfig config)
   {
     throw std::invalid_argument("invalid vehicle footprint geometry");
   }
-  const std::array<double, 8> limits{{
+  const std::array<double, 15> limits{{
     config_.min_steering, config_.max_steering,
     config_.min_steering_rate, config_.max_steering_rate,
+    config_.steering_response_time,
+    config_.min_effective_steering_rate, config_.max_effective_steering_rate,
+    config_.effective_steering_rate_speed_coefficient,
+    config_.steering_effectiveness_at_zero_speed,
+    config_.steering_effectiveness_speed_squared,
+    config_.minimum_steering_effectiveness,
     config_.min_acceleration, config_.max_acceleration,
     config_.min_speed, config_.max_speed}};
   if (!std::all_of(limits.begin(), limits.end(), [](double value) {return finite(value);})) {
@@ -242,6 +282,16 @@ BicycleModel::BicycleModel(VehicleConfig config)
   }
   if (config_.min_steering >= config_.max_steering ||
     config_.min_steering_rate >= config_.max_steering_rate ||
+    config_.steering_response_time <= 0.0 ||
+    config_.min_effective_steering_rate >= 0.0 ||
+    config_.max_effective_steering_rate <= 0.0 ||
+    config_.effective_steering_rate_speed_coefficient < 0.0 ||
+    config_.steering_effectiveness_at_zero_speed <= 0.0 ||
+    config_.steering_effectiveness_at_zero_speed > 1.0 ||
+    config_.steering_effectiveness_speed_squared < 0.0 ||
+    config_.minimum_steering_effectiveness <= 0.0 ||
+    config_.minimum_steering_effectiveness >
+    config_.steering_effectiveness_at_zero_speed ||
     config_.min_acceleration >= config_.max_acceleration ||
     config_.min_speed > config_.max_speed)
   {
@@ -256,9 +306,21 @@ State BicycleModel::derivative(const State & state, const Control & control) con
   State derivative;
   derivative.x = bounded_state.speed * std::cos(bounded_state.yaw);
   derivative.y = bounded_state.speed * std::sin(bounded_state.yaw);
-  derivative.yaw = bounded_state.speed * std::tan(bounded_state.steering) / config_.wheelbase;
+  const double kinematic_yaw_rate =
+    bounded_state.speed * std::tan(bounded_state.steering) / config_.wheelbase;
+  const double max_yaw_rate =
+    config_.max_lateral_acceleration / std::max(std::abs(bounded_state.speed), 0.1);
+  derivative.yaw = std::clamp(kinematic_yaw_rate, -max_yaw_rate, max_yaw_rate);
   derivative.speed = bounded.acceleration;
-  derivative.steering = bounded.steering_rate;
+  const double steering_error =
+    effectiveSteeringTarget(
+    config_, bounded_state.steering_command, bounded_state.speed) -
+    bounded_state.steering;
+  derivative.steering = std::clamp(
+    steering_error / config_.steering_response_time,
+    -effectiveSteeringRateLimit(config_, bounded_state.speed, false),
+    effectiveSteeringRateLimit(config_, bounded_state.speed, true));
+  derivative.steering_command = bounded.steering_rate;
   return derivative;
 }
 
@@ -281,6 +343,10 @@ State BicycleModel::step(const State & state, const Control & control, double dt
     state.speed + dt * (k1.speed + 2.0 * k2.speed + 2.0 * k3.speed + k4.speed) / 6.0;
   result.steering = state.steering +
     dt * (k1.steering + 2.0 * k2.steering + 2.0 * k3.steering + k4.steering) / 6.0;
+  result.steering_command = state.steering_command +
+    dt * (
+    k1.steering_command + 2.0 * k2.steering_command +
+    2.0 * k3.steering_command + k4.steering_command) / 6.0;
   return clampState(result);
 }
 
@@ -298,6 +364,8 @@ State BicycleModel::clampState(const State & state) const
   result.speed = std::clamp(result.speed, config_.min_speed, config_.max_speed);
   result.steering = std::clamp(
     result.steering, config_.min_steering, config_.max_steering);
+  result.steering_command = std::clamp(
+    result.steering_command, config_.min_steering, config_.max_steering);
   return result;
 }
 
@@ -309,10 +377,13 @@ const VehicleConfig & BicycleModel::config() const noexcept
 bool stateWithinLimits(const State & state, const VehicleConfig & vehicle) noexcept
 {
   return finite(state.x) && finite(state.y) && finite(state.yaw) && finite(state.speed) &&
-         finite(state.steering) && state.speed >= vehicle.min_speed - kEpsilon &&
+         finite(state.steering) && finite(state.steering_command) &&
+         state.speed >= vehicle.min_speed - kEpsilon &&
          state.speed <= vehicle.max_speed + kEpsilon &&
          state.steering >= vehicle.min_steering - kEpsilon &&
-         state.steering <= vehicle.max_steering + kEpsilon;
+         state.steering <= vehicle.max_steering + kEpsilon &&
+         state.steering_command >= vehicle.min_steering - kEpsilon &&
+         state.steering_command <= vehicle.max_steering + kEpsilon;
 }
 
 bool clampMeasuredSpeedWithinTolerance(
@@ -327,6 +398,71 @@ bool clampMeasuredSpeedWithinTolerance(
   }
   state.speed = std::clamp(state.speed, vehicle.min_speed, vehicle.max_speed);
   return stateWithinLimits(state, vehicle);
+}
+
+OverspeedRecovery::OverspeedRecovery(OverspeedRecoveryConfig config)
+: config_(config)
+{
+  if (!finite(config_.min_speed) || !finite(config_.max_command_speed) ||
+    config_.min_speed > config_.max_command_speed ||
+    !finite(config_.entry_margin) || config_.entry_margin <= 0.0 ||
+    !finite(config_.exit_margin) || config_.exit_margin < 0.0 ||
+    config_.exit_margin >= config_.entry_margin ||
+    !finite(config_.exit_hold_time) || config_.exit_hold_time < 0.0 ||
+    !finite(config_.command_reduction) || config_.command_reduction < 0.0 ||
+    !finite(config_.proportional_gain) || config_.proportional_gain < 0.0 ||
+    !finite(config_.command_deceleration) || config_.command_deceleration <= 0.0)
+  {
+    throw std::invalid_argument("invalid overspeed recovery configuration");
+  }
+}
+
+void OverspeedRecovery::reset() noexcept
+{
+  active_ = false;
+  clear_duration_ = 0.0;
+}
+
+OverspeedRecoveryResult OverspeedRecovery::update(
+  double measured_speed, double previous_command_speed, double dt) noexcept
+{
+  OverspeedRecoveryResult result;
+  if (!finite(measured_speed) || !finite(previous_command_speed) ||
+    !finite(dt) || dt < 0.0)
+  {
+    reset();
+    return result;
+  }
+
+  result.measured_excess = std::max(0.0, measured_speed - config_.max_command_speed);
+  if (measured_speed > config_.max_command_speed + config_.entry_margin) {
+    active_ = true;
+    clear_duration_ = 0.0;
+  } else if (active_) {
+    if (measured_speed <= config_.max_command_speed + config_.exit_margin) {
+      clear_duration_ += dt;
+      if (clear_duration_ >= config_.exit_hold_time) {
+        reset();
+      }
+    } else {
+      clear_duration_ = 0.0;
+    }
+  }
+
+  result.active = active_;
+  result.clear_duration = clear_duration_;
+  if (!active_) {
+    return result;
+  }
+
+  const double target = std::clamp(
+    config_.max_command_speed - config_.command_reduction -
+    config_.proportional_gain * result.measured_excess,
+    config_.min_speed, config_.max_command_speed);
+  result.command_limit = previous_command_speed > target ?
+    std::max(target, previous_command_speed - config_.command_deceleration * dt) :
+    target;
+  return result;
 }
 
 State propagateState(
@@ -845,6 +981,8 @@ void CpuMppiBackend::configure(const MppiConfig & config, const VehicleConfig & 
     config.clearance_recovery_steps > config.horizon_steps ||
     !finite(config.clearance_recovery_speed_threshold) ||
     config.clearance_recovery_speed_threshold < 0.0 ||
+    !finite(config.clearance_recovery_acceleration_speed_threshold) ||
+    config.clearance_recovery_acceleration_speed_threshold < 0.0 ||
     !std::all_of(
       weights.begin(), weights.end(),
       [](double value) {return finite(value) && value >= 0.0;}))
@@ -977,7 +1115,12 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
       map_margin >= -vehicle_.safety_margin &&
       map_margin >= clearanceRecoveryRequiredMargin(
       recovery_initial_margin, step, config_.clearance_recovery_steps);
-    if (map_margin < 0.0 && !recoverable_clearance) {
+    const bool moving_recovery_accelerates =
+      clearance_recovery &&
+      initial_state.speed > config_.clearance_recovery_acceleration_speed_threshold &&
+      step < config_.clearance_recovery_steps &&
+      control.acceleration > kEpsilon;
+    if ((map_margin < 0.0 && !recoverable_clearance) || moving_recovery_accelerates) {
       cost.collision += config_.weights.collision;
     }
     if (std::abs(projection.heading_error) > config_.maximum_heading_error ||
@@ -1221,6 +1364,12 @@ bool CpuMppiBackend::repairControls(
     State state = initial_state;
     std::size_t hint = race_line.nearestIndex(state.x, state.y);
     for (std::size_t step = 0U; step < config_.repair_steps; ++step) {
+      if (clearance_recovery &&
+        initial_state.speed > config_.clearance_recovery_acceleration_speed_threshold &&
+        step < config_.clearance_recovery_steps)
+      {
+        controls[step].acceleration = std::min(controls[step].acceleration, 0.0);
+      }
       controls[step] = model_.clampControl(controls[step]);
       const State candidate = model_.step(state, controls[step], config_.dt);
       const double candidate_time = static_cast<double>(step + 1U) * config_.dt;
@@ -1243,8 +1392,11 @@ bool CpuMppiBackend::repairControls(
         const double desired_steering = std::clamp(
           std::atan(vehicle_.wheelbase * desired_curvature),
           vehicle_.min_steering, vehicle_.max_steering);
+        const double desired_steering_command = std::clamp(
+          desired_steering / steeringEffectiveness(vehicle_, state.speed),
+          vehicle_.min_steering, vehicle_.max_steering);
         controls[step].steering_rate = std::clamp(
-          (desired_steering - state.steering) / config_.dt,
+          (desired_steering_command - state.steering_command) / config_.dt,
           vehicle_.min_steering_rate, vehicle_.max_steering_rate);
         controls[step].acceleration = std::clamp(
           std::min(controls[step].acceleration, -0.5 * state.speed / config_.dt),
@@ -1287,9 +1439,10 @@ MppiResult CpuMppiBackend::compute(const MppiRequest & request)
     result.reason = "invalid_request";
     return result;
   }
-  const std::array<double, 5> state_values{{
+  const std::array<double, 6> state_values{{
     request.initial_state.x, request.initial_state.y, request.initial_state.yaw,
-    request.initial_state.speed, request.initial_state.steering}};
+    request.initial_state.speed, request.initial_state.steering,
+    request.initial_state.steering_command}};
   if (!std::all_of(state_values.begin(), state_values.end(), finite)) {
     result.reason = "nonfinite_state";
     return result;

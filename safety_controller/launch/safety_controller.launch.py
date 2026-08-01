@@ -34,8 +34,8 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("output_topic", default_value="/ackermann_cmd"),
             DeclareLaunchArgument("max_speed", default_value="2.0"),
-            DeclareLaunchArgument("min_steering", default_value="-0.20"),
-            DeclareLaunchArgument("max_steering", default_value="0.20"),
+            DeclareLaunchArgument("min_steering", default_value="-0.32"),
+            DeclareLaunchArgument("max_steering", default_value="0.32"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             Node(
                 package="safety_controller",

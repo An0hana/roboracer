@@ -22,6 +22,19 @@ pose_odom:
     # controller and lighter on the bus. Set 0.0 to publish on every pose.
     publish_rate: 50.0
 
+    # Cartographer pose-graph optimization may correct the map pose by more
+    # than one metre in a single frame on this compact, repetitive track.
+    # Reject physically impossible frame-to-frame motion and blend the map
+    # correction in gradually so MPPI never receives a state teleport.
+    filter_pose_jumps: true
+    pose_step_slack: 0.05
+    max_pose_step_speed: 3.0
+    yaw_step_slack: 0.10
+    max_yaw_step_rate: 3.0
+    correction_linear_rate: 0.35
+    correction_angular_rate: 0.60
+    max_filter_dt: 0.10
+
     ############################################################
     # Speed from motor RPM
     ############################################################

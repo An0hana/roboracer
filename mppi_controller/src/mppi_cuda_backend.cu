@@ -36,7 +36,7 @@ namespace
 {
 
 constexpr int kCudaRollouts = 2048;
-constexpr int kCudaTimesteps = 48;
+constexpr int kCudaTimesteps = 72;
 constexpr int kLocalWaypointCapacity = 256;
 constexpr int kReferencePointsBehind = 24;
 constexpr float kMinimumBarrierScale = 0.02F;
@@ -99,6 +99,7 @@ struct F1TenthDynamicsParams : public DynamicsParams
     YAW,
     SPEED,
     STEERING,
+    STEERING_COMMAND,
     NUM_STATES
   };
 
@@ -116,6 +117,7 @@ struct F1TenthDynamicsParams : public DynamicsParams
     YAW,
     SPEED,
     STEERING,
+    STEERING_COMMAND,
     NUM_OUTPUTS
   };
 
@@ -124,6 +126,14 @@ struct F1TenthDynamicsParams : public DynamicsParams
   float max_steering{0.20F};
   float min_speed{0.0F};
   float max_speed{2.0F};
+  float steering_response_time{0.15F};
+  float min_effective_steering_rate{-1.20F};
+  float max_effective_steering_rate{1.20F};
+  float effective_steering_rate_speed_coefficient{0.18F};
+  float steering_effectiveness_at_zero_speed{1.0F};
+  float steering_effectiveness_speed_squared{0.05F};
+  float minimum_steering_effectiveness{0.70F};
+  float max_lateral_acceleration{6.0F};
 };
 
 constexpr int kSteeringRateIndex =
@@ -156,7 +166,7 @@ public:
 
   std::string getDynamicsModelName() const override
   {
-    return "F1TENTH five-state RK4 bicycle";
+    return "F1TENTH six-state RK4 bicycle with steering actuator";
   }
 
   void computeKinematics(
@@ -171,10 +181,14 @@ public:
   {
     derivative(S_INDEX(POS_X)) = state(S_INDEX(SPEED)) * cosf(state(S_INDEX(YAW)));
     derivative(S_INDEX(POS_Y)) = state(S_INDEX(SPEED)) * sinf(state(S_INDEX(YAW)));
-    derivative(S_INDEX(YAW)) = state(S_INDEX(SPEED)) * tanf(state(S_INDEX(STEERING))) /
-      this->params_.wheelbase;
+    const float kyaw_h = state(S_INDEX(SPEED)) *
+      tanf(state(S_INDEX(STEERING))) / this->params_.wheelbase;
+    const float myaw_h = this->params_.max_lateral_acceleration /
+      fmaxf(fabsf(state(S_INDEX(SPEED))), 0.1F);
+    derivative(S_INDEX(YAW)) = fminf(fmaxf(kyaw_h, -myaw_h), myaw_h);
     derivative(S_INDEX(SPEED)) = control(kAccelerationIndex);
-    derivative(S_INDEX(STEERING)) = control(kSteeringRateIndex);
+    derivative(S_INDEX(STEERING)) = effectiveSteeringDerivativeHost(state);
+    derivative(S_INDEX(STEERING_COMMAND)) = control(kSteeringRateIndex);
   }
 
   __device__ void computeKinematics(float *, float *)
@@ -189,10 +203,14 @@ public:
     }
     derivative[S_INDEX(POS_X)] = state[S_INDEX(SPEED)] * cosf(state[S_INDEX(YAW)]);
     derivative[S_INDEX(POS_Y)] = state[S_INDEX(SPEED)] * sinf(state[S_INDEX(YAW)]);
-    derivative[S_INDEX(YAW)] = state[S_INDEX(SPEED)] * tanf(state[S_INDEX(STEERING)]) /
-      this->params_.wheelbase;
+    const float kyaw_d = state[S_INDEX(SPEED)] *
+      tanf(state[S_INDEX(STEERING)]) / this->params_.wheelbase;
+    const float myaw_d = this->params_.max_lateral_acceleration /
+      fmaxf(fabsf(state[S_INDEX(SPEED)]), 0.1F);
+    derivative[S_INDEX(YAW)] = fminf(fmaxf(kyaw_d, -myaw_d), myaw_d);
     derivative[S_INDEX(SPEED)] = control[kAccelerationIndex];
-    derivative[S_INDEX(STEERING)] = control[kSteeringRateIndex];
+    derivative[S_INDEX(STEERING)] = effectiveSteeringDerivativeDevice(state);
+    derivative[S_INDEX(STEERING_COMMAND)] = control[kSteeringRateIndex];
   }
 
   void step(
@@ -261,7 +279,7 @@ public:
   {
     state_array state;
     state << values.at("POS_X"), values.at("POS_Y"), values.at("YAW"),
-      values.at("SPEED"), values.at("STEERING");
+      values.at("SPEED"), values.at("STEERING"), values.at("STEERING_COMMAND");
     return state;
   }
 
@@ -283,7 +301,8 @@ private:
     derivative(S_INDEX(YAW)) = state(S_INDEX(SPEED)) * tanf(state(S_INDEX(STEERING))) /
       this->params_.wheelbase;
     derivative(S_INDEX(SPEED)) = control(kAccelerationIndex);
-    derivative(S_INDEX(STEERING)) = control(kSteeringRateIndex);
+    derivative(S_INDEX(STEERING)) = effectiveSteeringDerivativeHost(state);
+    derivative(S_INDEX(STEERING_COMMAND)) = control(kSteeringRateIndex);
     return derivative;
   }
 
@@ -295,6 +314,9 @@ private:
     state(S_INDEX(STEERING)) = clampFloat(
       state(S_INDEX(STEERING)), this->params_.min_steering,
       this->params_.max_steering);
+    state(S_INDEX(STEERING_COMMAND)) = clampFloat(
+      state(S_INDEX(STEERING_COMMAND)), this->params_.min_steering,
+      this->params_.max_steering);
   }
 
   __device__ void derivativeDevice(
@@ -305,7 +327,8 @@ private:
     derivative[S_INDEX(YAW)] = state[S_INDEX(SPEED)] * tanf(state[S_INDEX(STEERING)]) /
       this->params_.wheelbase;
     derivative[S_INDEX(SPEED)] = control[kAccelerationIndex];
-    derivative[S_INDEX(STEERING)] = control[kSteeringRateIndex];
+    derivative[S_INDEX(STEERING)] = effectiveSteeringDerivativeDevice(state);
+    derivative[S_INDEX(STEERING_COMMAND)] = control[kSteeringRateIndex];
   }
 
   __device__ void clampStateDevice(float * state) const
@@ -316,6 +339,50 @@ private:
     state[S_INDEX(STEERING)] = clampFloat(
       state[S_INDEX(STEERING)], this->params_.min_steering,
       this->params_.max_steering);
+    state[S_INDEX(STEERING_COMMAND)] = clampFloat(
+      state[S_INDEX(STEERING_COMMAND)], this->params_.min_steering,
+      this->params_.max_steering);
+  }
+
+  float effectiveSteeringDerivativeHost(
+    const Eigen::Ref<const state_array> & state) const
+  {
+    const float speed_squared = state(S_INDEX(SPEED)) * state(S_INDEX(SPEED));
+    const float effectiveness = clampFloat(
+      this->params_.steering_effectiveness_at_zero_speed -
+      this->params_.steering_effectiveness_speed_squared * speed_squared,
+      this->params_.minimum_steering_effectiveness,
+      this->params_.steering_effectiveness_at_zero_speed);
+    const float target = clampFloat(
+      effectiveness * state(S_INDEX(STEERING_COMMAND)),
+      this->params_.min_steering, this->params_.max_steering);
+    const float rate_scale = 1.0F /
+      (1.0F + this->params_.effective_steering_rate_speed_coefficient * speed_squared);
+    return clampFloat(
+      (target - state(S_INDEX(STEERING))) /
+      this->params_.steering_response_time,
+      this->params_.min_effective_steering_rate * rate_scale,
+      this->params_.max_effective_steering_rate * rate_scale);
+  }
+
+  __device__ float effectiveSteeringDerivativeDevice(const float * state) const
+  {
+    const float speed_squared = state[S_INDEX(SPEED)] * state[S_INDEX(SPEED)];
+    const float effectiveness = clampFloat(
+      this->params_.steering_effectiveness_at_zero_speed -
+      this->params_.steering_effectiveness_speed_squared * speed_squared,
+      this->params_.minimum_steering_effectiveness,
+      this->params_.steering_effectiveness_at_zero_speed);
+    const float target = clampFloat(
+      effectiveness * state[S_INDEX(STEERING_COMMAND)],
+      this->params_.min_steering, this->params_.max_steering);
+    const float rate_scale = 1.0F /
+      (1.0F + this->params_.effective_steering_rate_speed_coefficient * speed_squared);
+    return clampFloat(
+      (target - state[S_INDEX(STEERING)]) /
+      this->params_.steering_response_time,
+      this->params_.min_effective_steering_rate * rate_scale,
+      this->params_.max_effective_steering_rate * rate_scale);
   }
 };
 
@@ -364,7 +431,7 @@ struct F1TenthCostParams : public CostParams<2>
   float obstacle_cover_radius[kMaxCostObstacles]{};
   int obstacle_segments[kMaxCostObstacles]{};
 
-  float dt{0.05F};
+  float dt{1.0F / 30.0F};
   float wheelbase{0.324F};
   float rear_extent{-0.124F};
   float front_extent{0.428F};
@@ -858,7 +925,7 @@ public:
       config.horizon_steps != static_cast<std::size_t>(kCudaTimesteps))
     {
       throw std::invalid_argument(
-              "CUDA backend is compiled for exactly 2048 rollouts and 48 horizon steps");
+              "CUDA backend is compiled for exactly 2048 rollouts and 72 horizon steps");
     }
     // Reuse the CPU implementation's validation and exact final safety model.
     validator_.configure(config, vehicle);
@@ -981,9 +1048,10 @@ public:
     {
       return finish("cuda_map_not_uploaded");
     }
-    const std::array<double, 5> state_values{{
+    const std::array<double, 6> state_values{{
       request.initial_state.x, request.initial_state.y, request.initial_state.yaw,
-      request.initial_state.speed, request.initial_state.steering}};
+      request.initial_state.speed, request.initial_state.steering,
+      request.initial_state.steering_command}};
     if (!std::all_of(
         state_values.begin(), state_values.end(),
         [](double value) {return std::isfinite(value);}))
@@ -1012,7 +1080,11 @@ public:
     if (request.initial_state.speed < vehicle_.min_speed - bounds_epsilon ||
       request.initial_state.speed > vehicle_.max_speed + bounds_epsilon ||
       request.initial_state.steering < vehicle_.min_steering - bounds_epsilon ||
-      request.initial_state.steering > vehicle_.max_steering + bounds_epsilon)
+      request.initial_state.steering > vehicle_.max_steering + bounds_epsilon ||
+      request.initial_state.steering_command <
+      vehicle_.min_steering - bounds_epsilon ||
+      request.initial_state.steering_command >
+      vehicle_.max_steering + bounds_epsilon)
     {
       // Measured state is authoritative.  Clamping it would optimize from a
       // fictitious pose/curvature and can make the safety certificate unsound.
@@ -1048,7 +1120,8 @@ public:
         static_cast<float>(request.initial_state.y),
         static_cast<float>(normalizeAngle(request.initial_state.yaw)),
         static_cast<float>(request.initial_state.speed),
-        static_cast<float>(request.initial_state.steering);
+        static_cast<float>(request.initial_state.steering),
+        static_cast<float>(request.initial_state.steering_command);
 
       controller_->computeControl(initial_state, 1);
       const cudaError_t cuda_status = cudaDeviceSynchronize();
@@ -1122,12 +1195,6 @@ public:
       if (result.valid) {
         last_control_ = result.control;
         if (fallback_kind == SafeFallbackKind::kBraking) {
-          // A fallback is an emergency command, not an optimized solution.
-          // Feeding its all-braking sequence back into the importance sampler
-          // creates a self-reinforcing zero-speed local minimum. Preserve the
-          // CUDA solution as the exploration center while moving; near rest
-          // seed a curvature-aware race-line tracking sequence. Every resulting
-          // trajectory still passes the same repair/validation stage.
           if (request.initial_state.speed <= 0.10) {
             controller_->updateImportanceSampler(
               toCudaControls(racelineTrackingControls(request)));
@@ -1139,6 +1206,10 @@ public:
           controller_->updateImportanceSampler(toCudaControls(controls));
           controller_->slideControlSequence(1);
         }
+      } else if (result.solve_time_ms > 2.0) {
+        // Solver ran but produced an invalid trajectory — still slide the
+        // importance sampler forward so it tracks the moving vehicle state.
+        controller_->slideControlSequence(1);
       }
       return result;
     } catch (const std::exception & exception) {
@@ -1202,13 +1273,17 @@ private:
       const double desired_steering = std::clamp(
         std::atan(vehicle_.wheelbase * desired_curvature),
         vehicle_.min_steering, vehicle_.max_steering);
+      const double desired_steering_command = std::clamp(
+        desired_steering / steeringEffectiveness(vehicle_, state.speed),
+        vehicle_.min_steering, vehicle_.max_steering);
 
       const double target_speed = std::clamp(
         std::min(reference.reference_speed, vehicle_.max_speed) *
         request.behavior.speed_scale,
         vehicle_.min_speed, vehicle_.max_speed);
       const Control control = seed_model_.clampControl(Control{
-        (desired_steering - state.steering) / std::max(0.15, config_.dt),
+        (desired_steering_command - state.steering_command) /
+        std::max(0.15, config_.dt),
         (target_speed - state.speed) / 0.50});
       controls.push_back(control);
       state = seed_model_.step(state, control, config_.dt);
@@ -1234,14 +1309,14 @@ private:
     }
 
     candidates[2].resize(kCudaTimesteps);
-    double steering = request.initial_state.steering;
+    double steering_command = request.initial_state.steering_command;
     for (Control & control : candidates[2]) {
       control.steering_rate = std::clamp(
-        -steering / config_.dt,
+        -steering_command / config_.dt,
         vehicle_.min_steering_rate, vehicle_.max_steering_rate);
       control.acceleration = vehicle_.min_acceleration;
-      steering = std::clamp(
-        steering + control.steering_rate * config_.dt,
+      steering_command = std::clamp(
+        steering_command + control.steering_rate * config_.dt,
         vehicle_.min_steering, vehicle_.max_steering);
     }
 
@@ -1302,6 +1377,22 @@ private:
     dynamics_params.max_steering = static_cast<float>(vehicle_.max_steering);
     dynamics_params.min_speed = static_cast<float>(vehicle_.min_speed);
     dynamics_params.max_speed = static_cast<float>(vehicle_.max_speed);
+    dynamics_params.steering_response_time =
+      static_cast<float>(vehicle_.steering_response_time);
+    dynamics_params.min_effective_steering_rate =
+      static_cast<float>(vehicle_.min_effective_steering_rate);
+    dynamics_params.max_effective_steering_rate =
+      static_cast<float>(vehicle_.max_effective_steering_rate);
+    dynamics_params.effective_steering_rate_speed_coefficient =
+      static_cast<float>(vehicle_.effective_steering_rate_speed_coefficient);
+    dynamics_params.steering_effectiveness_at_zero_speed =
+      static_cast<float>(vehicle_.steering_effectiveness_at_zero_speed);
+    dynamics_params.steering_effectiveness_speed_squared =
+      static_cast<float>(vehicle_.steering_effectiveness_speed_squared);
+    dynamics_params.minimum_steering_effectiveness =
+      static_cast<float>(vehicle_.minimum_steering_effectiveness);
+    dynamics_params.max_lateral_acceleration =
+      static_cast<float>(vehicle_.max_lateral_acceleration);
     dynamics_ = std::make_unique<F1TenthDynamics>(dynamics_params, vehicle_);
 
     cost_ = std::make_unique<F1TenthRaceCost>();
@@ -1330,7 +1421,7 @@ private:
     auto controller_params = controller_->getParams();
     controller_params.seed_ = config_.random_seed;
     // MPPI-Generic requires cost block x <= num_timesteps. Keep 32-thread
-    // rollout blocks while the controller uses a fixed 48-step horizon.
+    // rollout blocks while the controller uses a fixed 72-step horizon.
     controller_params.dynamics_rollout_dim_ = dim3(32, 1, 1);
     controller_params.cost_rollout_dim_ = dim3(32, 1, 1);
     controller_params.visualize_dim_ = dim3(32, 1, 1);
