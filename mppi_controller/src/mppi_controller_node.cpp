@@ -1064,8 +1064,6 @@ private:
     }
     if (!result.valid || result.solve_time_ms > max_solve_time_ms_) {
       const std::string reason = result.valid ? "solve_timeout" : result.reason;
-      safeResetBackend();
-
       if (!last_solver_failure_time_.has_value()) {
         last_solver_failure_time_ = tick_time;
       }
@@ -1073,21 +1071,65 @@ private:
         (tick_time - *last_solver_failure_time_).seconds();
 
       constexpr double kRecoveryMaxSpeed = 1.5;
-      constexpr double kRecoveryAcceleration = 1.0;
+      constexpr double kAebResetDuration = 0.5;
+      if (failure_duration > kAebResetDuration &&
+          request.initial_state.speed < 0.10) {
+        safeResetBackend();
+      }
 
       {
         State recovery_state = request.initial_state;
-        const double mppi_steering_rate = std::isfinite(result.control.steering_rate) ?
-          result.control.steering_rate : 0.0;
-        recovery_state.steering_command = std::clamp(
-          last_commanded_steering_ + mppi_steering_rate * command_dt,
-          vehicle_.min_steering, vehicle_.max_steering);
+        double recovery_steering_rate = 0.0;
+        if (race_line_.has_value() && race_line_->valid()) {
+          const TrackProjection proj = race_line_->project(
+            recovery_state, std::nullopt, mppi_.nearest_search_radius);
+          const Waypoint & ref = race_line_->atWrapped(
+            static_cast<std::ptrdiff_t>(proj.index));
+          const double lat_err = proj.lateral_error;
+          const double desired_heading = normalizeAngle(
+            ref.yaw - std::atan(1.5 * lat_err));
+          const double heading_correction =
+            normalizeAngle(desired_heading - recovery_state.yaw);
+          const double lookahead =
+            std::max(0.45, 0.45 + 0.25 * recovery_state.speed);
+          const double desired_curvature =
+            ref.curvature + 2.0 * std::sin(heading_correction) / lookahead;
+          const double desired_steering = std::atan(
+            vehicle_.wheelbase * desired_curvature);
+          const double eff = steeringEffectiveness(
+            vehicle_, recovery_state.speed);
+          const double desired_command = std::clamp(
+            desired_steering / std::max(eff, 0.01),
+            vehicle_.min_steering, vehicle_.max_steering);
+          recovery_steering_rate =
+            (desired_command - recovery_state.steering_command) /
+            std::max(0.15, command_dt);
+          recovery_state.steering_command = std::clamp(
+            recovery_state.steering_command +
+            recovery_steering_rate * command_dt,
+            vehicle_.min_steering, vehicle_.max_steering);
+        } else {
+          recovery_state.steering_command = last_commanded_steering_;
+        }
         recovery_state.speed = kRecoveryMaxSpeed;
-        Control recovery_control{
-          mppi_steering_rate,
-          kRecoveryAcceleration};
+        const double mppi_accel = std::isfinite(result.control.acceleration) ?
+          result.control.acceleration : 0.0;
+        Control recovery_control{recovery_steering_rate, mppi_accel};
+
         publishCommand(recovery_state, recovery_control, tick_time);
-        publishPath(result.predicted_states, tick_time);
+
+        if (!result.predicted_states.empty()) {
+          publishPath(result.predicted_states, tick_time);
+        } else {
+          std::vector<State> predicted(mppi_.horizon_steps);
+          State s = recovery_state;
+          for (std::size_t i = 0U; i < mppi_.horizon_steps; ++i) {
+            s = model_->step(s, recovery_control, 0.05);
+            predicted[i] = s;
+          }
+          publishPath(predicted, tick_time);
+        }
+
         publishDiagnostics(
           "solver_failure_recovery",
           diagnostic_msgs::msg::DiagnosticStatus::WARN,

@@ -1195,12 +1195,6 @@ public:
       if (result.valid) {
         last_control_ = result.control;
         if (fallback_kind == SafeFallbackKind::kBraking) {
-          // A fallback is an emergency command, not an optimized solution.
-          // Feeding its all-braking sequence back into the importance sampler
-          // creates a self-reinforcing zero-speed local minimum. Preserve the
-          // CUDA solution as the exploration center while moving; near rest
-          // seed a curvature-aware race-line tracking sequence. Every resulting
-          // trajectory still passes the same repair/validation stage.
           if (request.initial_state.speed <= 0.10) {
             controller_->updateImportanceSampler(
               toCudaControls(racelineTrackingControls(request)));
@@ -1212,6 +1206,10 @@ public:
           controller_->updateImportanceSampler(toCudaControls(controls));
           controller_->slideControlSequence(1);
         }
+      } else if (result.solve_time_ms > 2.0) {
+        // Solver ran but produced an invalid trajectory — still slide the
+        // importance sampler forward so it tracks the moving vehicle state.
+        controller_->slideControlSequence(1);
       }
       return result;
     } catch (const std::exception & exception) {
