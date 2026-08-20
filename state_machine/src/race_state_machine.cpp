@@ -54,7 +54,16 @@ void validateConfig(const StateMachineConfig & config)
     config.minimum_raceline_weight_scale <= 0.0 ||
     config.minimum_raceline_weight_scale > 1.0 ||
     !finite(config.maximum_safety_weight_scale) ||
-    config.maximum_safety_weight_scale < 1.0)
+    config.maximum_safety_weight_scale < 1.0 ||
+    !finite(config.stuck_command_speed_threshold) ||
+    config.stuck_command_speed_threshold <= 0.0 ||
+    !finite(config.stuck_speed_threshold) || config.stuck_speed_threshold <= 0.0 ||
+    !finite(config.stuck_confirmation) || config.stuck_confirmation <= 0.0 ||
+    !finite(config.recovery_reverse_distance) || config.recovery_reverse_distance <= 0.0 ||
+    !finite(config.recovery_max_reverse_time) || config.recovery_max_reverse_time <= 0.0 ||
+    !finite(config.recovery_settle_confirmation) ||
+    config.recovery_settle_confirmation < 0.0 ||
+    !finite(config.recovery_cooldown) || config.recovery_cooldown < 0.0)
   {
     throw std::invalid_argument("invalid race state machine configuration");
   }
@@ -107,13 +116,15 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
     !finite(observation.opponent_longitudinal_speed) ||
     !finite(observation.left_clearance_score) ||
     !finite(observation.right_clearance_score) ||
-    !finite(observation.track_confidence))
+    !finite(observation.track_confidence) ||
+    !finite(observation.commanded_speed))
   {
     throw std::invalid_argument("state observation must be finite");
   }
   if (initialized_ && observation.time < last_time_) {
     throw std::invalid_argument("state observation time must be monotonic");
   }
+  const double dt = initialized_ ? observation.time - last_time_ : 0.0;
   if (!initialized_) {
     initialized_ = true;
     state_enter_time_ = observation.time;
@@ -166,6 +177,87 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
 
   if (safety_state_ != SafetyState::READY) {
     return command(observation.time);
+  }
+
+  if (behavior_state_ == BehaviorState::RECOVERY) {
+    if (!observation.command_available) {
+      transitionSafety(
+        SafetyState::FAULT, "recovery_command_unavailable", observation.time);
+      return command(observation.time);
+    }
+
+    if (recovery_phase_ == RecoveryPhase::REVERSE) {
+      recovery_distance_ += std::max(0.0, -observation.ego_speed) * dt;
+      const bool distance_reached =
+        recovery_distance_ >= config_.recovery_reverse_distance;
+      const bool time_reached =
+        observation.time - recovery_start_time_ >= config_.recovery_max_reverse_time;
+      if (!observation.reverse_path_clear || distance_reached || time_reached) {
+        recovery_phase_ = RecoveryPhase::SETTLE;
+        recovery_settle_since_.reset();
+        reason_ = !observation.reverse_path_clear ?
+          "recovery_reverse_blocked" :
+          (distance_reached ? "recovery_distance_reached" : "recovery_time_limit");
+      }
+    }
+
+    if (recovery_phase_ == RecoveryPhase::SETTLE) {
+      if (std::abs(observation.ego_speed) <= config_.stuck_speed_threshold) {
+        if (!recovery_settle_since_.has_value()) {
+          recovery_settle_since_ = observation.time;
+        }
+        if (observation.time - *recovery_settle_since_ >=
+          config_.recovery_settle_confirmation)
+        {
+          transitionBehavior(
+            BehaviorState::RACING, PreferredSide::NONE,
+            "recovery_complete", observation.time);
+        }
+      } else {
+        recovery_settle_since_.reset();
+      }
+      if (behavior_state_ == BehaviorState::RECOVERY &&
+        observation.time - recovery_start_time_ >=
+        config_.recovery_max_reverse_time + 1.0)
+      {
+        transitionSafety(SafetyState::STOP, "recovery_settle_timeout", observation.time);
+      }
+    }
+    return command(observation.time);
+  }
+
+  const bool cooldown_elapsed =
+    !last_recovery_exit_time_.has_value() ||
+    observation.time - *last_recovery_exit_time_ >= config_.recovery_cooldown;
+  // A solver that cannot find a safe forward rollout deliberately publishes a
+  // zero-speed braking command.  Requiring a positive output command here
+  // creates a deadlock: the condition that should request recovery can never
+  // become true.  RACING and OVERTAKE both imply forward-motion intent, while
+  // TRAILING may legitimately hold position behind a stopped opponent and
+  // therefore still requires an explicit positive command.
+  const bool forward_motion_expected =
+    behavior_state_ == BehaviorState::RACING ||
+    behavior_state_ == BehaviorState::OVERTAKE ||
+    (behavior_state_ == BehaviorState::TRAILING &&
+    observation.commanded_speed >= config_.stuck_command_speed_threshold);
+  const bool stuck_candidate =
+    observation.command_available && cooldown_elapsed &&
+    forward_motion_expected &&
+    std::abs(observation.ego_speed) <= config_.stuck_speed_threshold;
+  if (stuck_candidate) {
+    if (!stuck_since_.has_value()) {
+      stuck_since_ = observation.time;
+    }
+    if (observation.time - *stuck_since_ >= config_.stuck_confirmation &&
+      observation.reverse_path_clear)
+    {
+      transitionBehavior(
+        BehaviorState::RECOVERY, PreferredSide::NONE,
+        "vehicle_stuck", observation.time);
+      return command(observation.time);
+    }
+  } else {
+    stuck_since_.reset();
   }
 
   const bool behavior_can_change =
@@ -241,6 +333,8 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
         }
       }
       break;
+    case BehaviorState::RECOVERY:
+      break;
   }
   return command(observation.time);
 }
@@ -306,12 +400,16 @@ bool RaceStateMachine::transitionConfirmed(
 void RaceStateMachine::transitionSafety(
   SafetyState target, const std::string & reason, double now)
 {
+  if (behavior_state_ == BehaviorState::RECOVERY) {
+    last_recovery_exit_time_ = now;
+  }
   safety_state_ = target;
   behavior_state_ = BehaviorState::RACING;
   preferred_side_ = PreferredSide::NONE;
   reason_ = reason;
   state_enter_time_ = now;
   return_blend_initial_offset_ = 0.0;
+  resetRecovery();
   clearPendingTransition();
 }
 
@@ -327,6 +425,17 @@ void RaceStateMachine::transitionBehavior(
       config_.overtake_lateral_offset : -config_.overtake_lateral_offset;
     return_blend_start_time_ = now;
   }
+  if (target == BehaviorState::RECOVERY) {
+    recovery_phase_ = RecoveryPhase::REVERSE;
+    recovery_distance_ = 0.0;
+    recovery_start_time_ = now;
+    recovery_settle_since_.reset();
+    stuck_since_.reset();
+    return_blend_initial_offset_ = 0.0;
+  } else if (behavior_state_ == BehaviorState::RECOVERY) {
+    last_recovery_exit_time_ = now;
+    resetRecovery();
+  }
   behavior_state_ = target;
   preferred_side_ = side;
   reason_ = reason;
@@ -340,11 +449,21 @@ void RaceStateMachine::clearPendingTransition()
   pending_reason_.clear();
 }
 
+void RaceStateMachine::resetRecovery()
+{
+  recovery_phase_ = RecoveryPhase::NONE;
+  recovery_distance_ = 0.0;
+  recovery_start_time_ = 0.0;
+  recovery_settle_since_.reset();
+  stuck_since_.reset();
+}
+
 StateCommand RaceStateMachine::command(double now) const
 {
   StateCommand output;
   output.safety_state = safety_state_;
   output.behavior_state = behavior_state_;
+  output.recovery_phase = recovery_phase_;
   output.preferred_side = preferred_side_;
   output.reason = reason_;
   output.track_confidence = latest_track_confidence_;
@@ -382,6 +501,11 @@ StateCommand RaceStateMachine::command(double now) const
       output.lateral_reference_offset =
         preferred_side_ == PreferredSide::LEFT ?
         config_.overtake_lateral_offset : -config_.overtake_lateral_offset;
+      break;
+    case BehaviorState::RECOVERY:
+      // The MPPI node interprets recovery_phase and bypasses normal sampling.
+      // Keeping the scale at zero prevents a stale consumer from driving forward.
+      output.speed_scale = 0.0;
       break;
   }
   return output;

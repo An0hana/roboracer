@@ -19,6 +19,11 @@ StateMachineConfig config()
   value.recovery_confirmation = 0.50;
   value.opponent_lost_timeout = 0.50;
   value.return_blend_duration = 1.0;
+  value.stuck_confirmation = 0.30;
+  value.recovery_reverse_distance = 0.10;
+  value.recovery_max_reverse_time = 1.0;
+  value.recovery_settle_confirmation = 0.10;
+  value.recovery_cooldown = 0.50;
   return value;
 }
 
@@ -196,6 +201,85 @@ TEST(RaceStateMachine, DeformationScalesOneBaseParameterSetContinuously)
   EXPECT_NEAR(result.safety_weight_scale, 1.6, 1.0e-9);
 }
 
+TEST(RaceStateMachine, RecoversAConfirmedStationaryForwardCommand)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+  observation.command_available = true;
+  observation.commanded_speed = 0.40;
+  observation.ego_speed = 0.0;
+  observation.reverse_path_clear = true;
+
+  auto result = runFor(machine, observation, 0.40);
+  ASSERT_EQ(result.behavior_state, BehaviorState::RECOVERY);
+  EXPECT_EQ(result.recovery_phase, RecoveryPhase::REVERSE);
+  EXPECT_DOUBLE_EQ(result.speed_scale, 0.0);
+  EXPECT_FALSE(result.stop_requested);
+
+  observation.commanded_speed = -0.25;
+  observation.ego_speed = -0.20;
+  result = runFor(machine, observation, 0.60);
+  ASSERT_EQ(result.behavior_state, BehaviorState::RECOVERY);
+  EXPECT_EQ(result.recovery_phase, RecoveryPhase::SETTLE);
+
+  observation.commanded_speed = 0.0;
+  observation.ego_speed = 0.0;
+  result = runFor(machine, observation, 0.20);
+  EXPECT_EQ(result.behavior_state, BehaviorState::RACING);
+  EXPECT_EQ(result.recovery_phase, RecoveryPhase::NONE);
+  EXPECT_EQ(result.reason, "recovery_complete");
+}
+
+TEST(RaceStateMachine, RecoversFromZeroSpeedBrakingFallbackWhileRacing)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+  observation.command_available = true;
+  observation.commanded_speed = 0.0;
+  observation.ego_speed = 0.0;
+  observation.reverse_path_clear = true;
+
+  const auto result = runFor(machine, observation, 0.40);
+  EXPECT_EQ(result.behavior_state, BehaviorState::RECOVERY);
+  EXPECT_EQ(result.recovery_phase, RecoveryPhase::REVERSE);
+  EXPECT_EQ(result.reason, "vehicle_stuck");
+}
+
+TEST(RaceStateMachine, DoesNotReverseIntoABlockedRearCorridor)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+  observation.command_available = true;
+  observation.commanded_speed = 0.40;
+  observation.ego_speed = 0.0;
+  observation.reverse_path_clear = false;
+
+  const auto result = runFor(machine, observation, 1.0);
+  EXPECT_EQ(result.behavior_state, BehaviorState::RACING);
+  EXPECT_EQ(result.recovery_phase, RecoveryPhase::NONE);
+}
+
+TEST(RaceStateMachine, MissingCommandStopsAnActiveRecovery)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+  observation.command_available = true;
+  observation.commanded_speed = 0.40;
+  observation.reverse_path_clear = true;
+  auto result = runFor(machine, observation, 0.40);
+  ASSERT_EQ(result.behavior_state, BehaviorState::RECOVERY);
+
+  observation.command_available = false;
+  result = machine.update(observation);
+  EXPECT_EQ(result.safety_state, SafetyState::FAULT);
+  EXPECT_TRUE(result.stop_requested);
+  EXPECT_EQ(result.reason, "recovery_command_unavailable");
+}
+
 TEST(TrackConfidenceFilter, FallsFastAndRecoversSlowly)
 {
   TrackConfidenceFilter filter(1.5, 0.35);
@@ -213,6 +297,9 @@ TEST(RaceStateMachine, RejectsInvalidInputAndConfiguration)
   EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
   invalid = config();
   invalid.maximum_follow_distance = invalid.follow_distance - 0.1;
+  EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
+  invalid = config();
+  invalid.recovery_reverse_distance = 0.0;
   EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
 
   RaceStateMachine machine(config());

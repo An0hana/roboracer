@@ -209,6 +209,27 @@ TEST(DistanceField, RepresentsObstaclesUnknownCellsAndRotatedOrigins)
   EXPECT_DOUBLE_EQ(field.clearance(100.0, 100.0), 0.0);
 }
 
+TEST(DistanceField, VehicleFootprintClearanceCoversTheWholeBody)
+{
+  constexpr std::size_t width = 80U;
+  constexpr std::size_t height = 80U;
+  constexpr double resolution = 0.05;
+  constexpr double origin = -2.0;
+  std::vector<std::int8_t> grid(width * height, 0);
+  const auto obstacle_x = static_cast<std::size_t>((0.25 - origin) / resolution);
+  const auto obstacle_y = static_cast<std::size_t>((0.0 - origin) / resolution);
+  grid[obstacle_y * width + obstacle_x] = 100;
+  const DistanceField field = DistanceField::fromOccupancyGrid(
+    width, height, resolution, origin, origin, grid, 50, false);
+  const VehicleConfig vehicle;
+
+  EXPECT_LT(vehicleFootprintClearance(State{}, vehicle, &field), 0.0);
+  EXPECT_GT(
+    vehicleFootprintClearance(State{1.0, 0.0, 0.0, 0.0, 0.0}, vehicle, &field),
+    0.20);
+  EXPECT_TRUE(std::isinf(vehicleFootprintClearance(State{}, vehicle, nullptr)));
+}
+
 TEST(Cost, BoundaryViolationAndCbfArePenalized)
 {
   const RaceLine track = makeCircle(false, 0.45);

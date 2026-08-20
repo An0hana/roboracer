@@ -264,6 +264,12 @@ struct Obstacle
   const State & state, const VehicleConfig & vehicle,
   const std::vector<Obstacle> * obstacles, double time);
 
+// Conservative clearance between the complete rectangular vehicle footprint
+// and a scan-derived distance field. Infinity when no valid field is supplied.
+[[nodiscard]] double vehicleFootprintClearance(
+  const State & state, const VehicleConfig & vehicle,
+  const DistanceField * distance_field);
+
 struct CostWeights
 {
   double lateral{12.0};

@@ -151,6 +151,11 @@ private:
     declare_parameter<double>("recovery.stuck_minimum_clearance", 0.05);
     declare_parameter<double>("recovery.stuck_timeout", 1.50);
     declare_parameter<double>("recovery.stuck_cooldown", 2.00);
+    declare_parameter<double>("recovery.reverse_speed", 0.25);
+    declare_parameter<double>("recovery.reverse_distance", 0.40);
+    declare_parameter<double>("recovery.reverse_sample_step", 0.025);
+    declare_parameter<double>("recovery.entry_stop_time", 0.30);
+    declare_parameter<double>("recovery.initial_clearance_tolerance", 0.08);
     declare_parameter<int>("mppi.random_seed", 7);
     declare_parameter<int>("mppi.nearest_search_radius", 80);
     declare_parameter<double>("mppi.cbf_gamma", 0.35);
@@ -420,6 +425,13 @@ private:
         parameter<double>("recovery.stuck_minimum_clearance");
       stuck_timeout_ = parameter<double>("recovery.stuck_timeout");
       stuck_cooldown_ = parameter<double>("recovery.stuck_cooldown");
+      recovery_reverse_speed_ = parameter<double>("recovery.reverse_speed");
+      recovery_reverse_distance_ = parameter<double>("recovery.reverse_distance");
+      recovery_reverse_sample_step_ =
+        parameter<double>("recovery.reverse_sample_step");
+      recovery_entry_stop_time_ = parameter<double>("recovery.entry_stop_time");
+      recovery_initial_clearance_tolerance_ =
+        parameter<double>("recovery.initial_clearance_tolerance");
       if (!positive(control_frequency_) || !positive(state_timeout_) ||
         !positive(costmap_timeout_) || !positive(costmap_processing_frequency_) ||
         !positive(output_timeout_) || !positive(tf_timeout_) || !positive(max_solve_time_ms_) ||
@@ -434,6 +446,13 @@ private:
         stuck_speed_scale_threshold_ < 0.0 || stuck_speed_scale_threshold_ > 1.0 ||
         !std::isfinite(stuck_minimum_clearance_) || stuck_minimum_clearance_ < 0.0 ||
         !positive(stuck_timeout_) || !positive(stuck_cooldown_) ||
+        !positive(recovery_reverse_speed_) || recovery_reverse_speed_ > 1.0 ||
+        !positive(recovery_reverse_distance_) ||
+        !positive(recovery_reverse_sample_step_) ||
+        recovery_reverse_sample_step_ > recovery_reverse_distance_ ||
+        !std::isfinite(recovery_entry_stop_time_) || recovery_entry_stop_time_ < 0.0 ||
+        !std::isfinite(recovery_initial_clearance_tolerance_) ||
+        recovery_initial_clearance_tolerance_ < 0.0 ||
         occupied_threshold_ < 0 || occupied_threshold_ > 100)
       {
         error = "node timing or occupancy parameters are out of range";
@@ -512,6 +531,8 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     last_solver_failure_time_.reset();
+    recovery_behavior_active_ = false;
+    recovery_behavior_enter_time_.reset();
     RCLCPP_INFO(
       get_logger(),
       "Configured %s backend: %zu rollouts x %zu steps, %.1f Hz; "
@@ -536,6 +557,8 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     last_solver_failure_time_.reset();
+    recovery_behavior_active_ = false;
+    recovery_behavior_enter_time_.reset();
     last_commanded_speed_ = 0.0;
     overspeed_recovery_.reset();
     last_output_time_ = now();
@@ -581,6 +604,8 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     last_solver_failure_time_.reset();
+    recovery_behavior_active_ = false;
+    recovery_behavior_enter_time_.reset();
     {
       std::lock_guard<std::mutex> lock(costmap_callback_mutex_);
       last_costmap_processing_time_.reset();
@@ -842,12 +867,147 @@ private:
     latest_race_state_ = std::move(timed);
   }
 
+  std::vector<State> reverseRecoveryPath(const State & initial_state) const
+  {
+    VehicleConfig reverse_vehicle = vehicle_;
+    reverse_vehicle.min_speed = -recovery_reverse_speed_;
+    BicycleModel reverse_model(reverse_vehicle);
+    State state = initial_state;
+    state.speed = -recovery_reverse_speed_;
+    // Recovery first centres the front wheels while stationary.  Model the
+    // subsequent escape as a straight reverse along the vehicle's current
+    // longitudinal tangent instead of extending the steering angle that put
+    // the vehicle against the wall.
+    state.steering_command = 0.0;
+    state.steering = 0.0;
+    const double dt = recovery_reverse_sample_step_ / recovery_reverse_speed_;
+    const std::size_t sample_count = static_cast<std::size_t>(
+      std::ceil(recovery_reverse_distance_ / recovery_reverse_sample_step_));
+    std::vector<State> path;
+    path.reserve(sample_count + 1U);
+    path.push_back(state);
+    for (std::size_t index = 0U; index < sample_count; ++index) {
+      state = reverse_model.step(state, Control{}, dt);
+      path.push_back(state);
+    }
+    return path;
+  }
+
+  bool reverseRecoveryPathSafe(
+    const std::vector<State> & path, const DistanceField * distance_field,
+    const std::vector<Obstacle> * obstacles) const
+  {
+    if (path.empty()) {
+      return false;
+    }
+    const auto margin = [this, distance_field, obstacles](
+        const State & state, double time) {
+        return std::min(
+          vehicleFootprintClearance(state, vehicle_, distance_field),
+          obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
+      };
+    double previous_margin = margin(path.front(), 0.0);
+    if (!std::isfinite(previous_margin) ||
+      previous_margin < -recovery_initial_clearance_tolerance_)
+    {
+      return false;
+    }
+    const double dt = recovery_reverse_sample_step_ / recovery_reverse_speed_;
+    for (std::size_t index = 1U; index < path.size(); ++index) {
+      const double current_margin = margin(path[index], dt * static_cast<double>(index));
+      if (!std::isfinite(current_margin) ||
+        current_margin < -recovery_initial_clearance_tolerance_)
+      {
+        return false;
+      }
+      if (previous_margin >= 0.0 && current_margin < 0.0) {
+        return false;
+      }
+      // If the vehicle starts just inside the soft safety envelope, recovery
+      // may continue only while clearance improves monotonically.
+      if (previous_margin < 0.0 && current_margin + 0.005 < previous_margin) {
+        return false;
+      }
+      previous_margin = current_margin;
+    }
+    return previous_margin >= 0.0;
+  }
+
+  void publishRecoveryCommand(
+    const MppiRequest & request, const std::vector<Obstacle> & obstacles,
+    const rclcpp::Time & tick_time, double state_age, double costmap_age)
+  {
+    if (!recovery_behavior_active_) {
+      recovery_behavior_active_ = true;
+      recovery_behavior_enter_time_ = tick_time;
+      safeResetBackend();
+      last_commanded_speed_ = 0.0;
+      last_applied_control_ = Control{};
+    }
+
+    const double elapsed = recovery_behavior_enter_time_.has_value() ?
+      std::max(0.0, (tick_time - *recovery_behavior_enter_time_).seconds()) : 0.0;
+    double target_speed = 0.0;
+    std::string reason = "recovery_settle";
+    std::vector<State> path;
+    if (active_recovery_phase_ ==
+      roboracer_msgs::msg::RaceState::RECOVERY_PHASE_REVERSE)
+    {
+      if (elapsed < recovery_entry_stop_time_) {
+        reason = "recovery_center_steering";
+      } else {
+        path = reverseRecoveryPath(request.initial_state);
+        if (reverseRecoveryPathSafe(path, request.distance_field, &obstacles)) {
+          target_speed = -recovery_reverse_speed_;
+          reason = "recovery_reverse";
+        } else {
+          reason = "recovery_reverse_unsafe";
+        }
+      }
+    } else if (active_recovery_phase_ !=
+      roboracer_msgs::msg::RaceState::RECOVERY_PHASE_SETTLE)
+    {
+      reason = "recovery_phase_invalid";
+    }
+
+    State commanded_state = request.initial_state;
+    commanded_state.speed = target_speed;
+    commanded_state.steering_command = 0.0;
+    const double command_dt = last_command_time_.has_value() ?
+      std::clamp((tick_time - *last_command_time_).seconds(), 1.0e-3, 2.0 * mppi_.dt) :
+      mppi_.dt;
+    Control control;
+    control.steering_rate = std::clamp(
+      (commanded_state.steering_command - last_commanded_steering_) / command_dt,
+      vehicle_.min_steering_rate, vehicle_.max_steering_rate);
+    control.acceleration = std::clamp(
+      (target_speed - last_commanded_speed_) / command_dt,
+      vehicle_.min_acceleration, vehicle_.max_acceleration);
+    publishCommand(commanded_state, control, tick_time);
+    if (!path.empty()) {
+      publishPath(path, tick_time);
+    }
+    publishDiagnostics(
+      reason, diagnostic_msgs::msg::DiagnosticStatus::WARN,
+      state_age, nullptr, costmap_age);
+    last_commanded_speed_ = target_speed;
+    last_commanded_steering_ = commanded_state.steering_command;
+    last_commanded_steering_atomic_.store(last_commanded_steering_);
+    last_applied_control_ = control;
+    last_command_time_ = tick_time;
+    last_output_time_ = tick_time;
+  }
+
   void controlTick()
   {
     const rclcpp::Time tick_time = now();
     active_measured_speed_ = std::numeric_limits<double>::quiet_NaN();
     active_recovery_speed_threshold_ = std::numeric_limits<double>::quiet_NaN();
     active_stuck_duration_ = 0.0;
+    active_safety_state_ = roboracer_msgs::msg::RaceState::SAFETY_READY;
+    active_behavior_state_ = roboracer_msgs::msg::RaceState::BEHAVIOR_RACING;
+    active_recovery_phase_ = roboracer_msgs::msg::RaceState::RECOVERY_PHASE_NONE;
+    active_track_confidence_ = 1.0;
     const double output_age = (tick_time - last_output_time_).seconds();
     if (!std::isfinite(output_age) || output_age < -0.02 || output_age > output_timeout_) {
       safeResetBackend();
@@ -985,6 +1145,7 @@ private:
           std::clamp(behavior.track_confidence, 0.0, 1.0);
         active_safety_state_ = behavior.safety_state;
         active_behavior_state_ = behavior.behavior_state;
+        active_recovery_phase_ = behavior.recovery_phase;
       }
     } else if (require_race_state_) {
       safeResetBackend();
@@ -1047,6 +1208,25 @@ private:
         0.0, 1.0);
       request.exploration_scale = 1.0 +
         proximity * (near_obstacle_exploration_scale_ - 1.0);
+    }
+
+    if (active_behavior_state_ ==
+      roboracer_msgs::msg::RaceState::BEHAVIOR_RECOVERY)
+    {
+      publishRecoveryCommand(
+        request, request_obstacles, tick_time, state_age, costmap_age);
+      return;
+    }
+    if (recovery_behavior_active_) {
+      // Recovery exits only after odometry confirms the car has settled. A
+      // fresh warm start avoids reusing the pre-recovery braking solution.
+      safeResetBackend();
+      recovery_behavior_active_ = false;
+      recovery_behavior_enter_time_.reset();
+      last_commanded_speed_ = 0.0;
+      last_applied_control_ = Control{};
+      last_command_time_.reset();
+      overspeed_recovery_.reset();
     }
     MppiResult result;
     try {
@@ -1410,6 +1590,8 @@ private:
     status.values.push_back(diagnosticValue(
       "behavior_state", static_cast<double>(active_behavior_state_)));
     status.values.push_back(diagnosticValue(
+      "recovery_phase", static_cast<double>(active_recovery_phase_)));
+    status.values.push_back(diagnosticValue(
       "behavior_speed_scale", active_behavior_.speed_scale));
     status.values.push_back(diagnosticValue(
       "raceline_weight_scale", active_behavior_.raceline_weight_scale));
@@ -1531,6 +1713,11 @@ private:
   double stuck_minimum_clearance_{0.05};
   double stuck_timeout_{1.50};
   double stuck_cooldown_{2.00};
+  double recovery_reverse_speed_{0.25};
+  double recovery_reverse_distance_{0.40};
+  double recovery_reverse_sample_step_{0.025};
+  double recovery_entry_stop_time_{0.30};
+  double recovery_initial_clearance_tolerance_{0.08};
   double active_recovery_speed_threshold_{
     std::numeric_limits<double>::quiet_NaN()};
   double active_measured_speed_{
@@ -1548,6 +1735,10 @@ private:
     roboracer_msgs::msg::RaceState::SAFETY_READY};
   std::uint8_t active_behavior_state_{
     roboracer_msgs::msg::RaceState::BEHAVIOR_RACING};
+  std::uint8_t active_recovery_phase_{
+    roboracer_msgs::msg::RaceState::RECOVERY_PHASE_NONE};
+  bool recovery_behavior_active_{false};
+  std::optional<rclcpp::Time> recovery_behavior_enter_time_;
 
   std::mutex data_mutex_;
   std::mutex costmap_callback_mutex_;

@@ -97,6 +97,17 @@ mppi_controller:
       stuck_minimum_clearance: 0.05
       stuck_timeout: 1.50
       stuck_cooldown: 2.00
+      # Explicit behavior-state recovery. Normal MPPI retains min_speed=0 so
+      # random rollouts never reverse; only RECOVERY may command this speed.
+      # First command zero speed and zero steering, then reverse in a straight
+      # line along the vehicle's current longitudinal tangent.
+      reverse_speed: 0.25
+      reverse_distance: 0.40
+      reverse_sample_step: 0.025
+      entry_stop_time: 0.30
+      # Permit a small scan/grid envelope violation only when every reverse
+      # sample improves clearance and the endpoint restores the hard margin.
+      initial_clearance_tolerance: 0.08
 
     cuda:
       # Preallocated once during lifecycle configure (4M float cells = 16 MiB).
