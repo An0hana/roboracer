@@ -1,0 +1,96 @@
+amcl:
+  ros__parameters:
+    use_sim_time: false
+
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"          # published by pose_odom from dead reckoning
+    global_frame_id: "map"
+    scan_topic: "/scan"
+
+    # ---- particle count ---------------------------------------------------
+    # The track is 19 x 11 m and the start pose is known, so a large particle
+    # cloud buys nothing. Jetson headroom matters more: MPPI already owns the
+    # GPU and Cartographer's Ceres solver was clipped to 6 threads.
+    min_particles: 500
+    max_particles: 2000
+
+    # ---- motion model -----------------------------------------------------
+    # Ackermann, so "omni" is wrong; differential is the correct approximation
+    # for a car that cannot move sideways.
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+
+    # alpha1 rot-from-rot, alpha2 rot-from-trans,
+    # alpha3 trans-from-trans, alpha4 trans-from-rot.
+    # Dead reckoning here is ERPM speed (~2% scale error) plus a bias-corrected
+    # gyro, which is far better than raw wheel odometry on a skidding RC car.
+    # Understating the noise is the failure mode that makes AMCL ignore the
+    # scan and drift, so these stay moderate rather than tight.
+    alpha1: 0.15
+    alpha2: 0.15
+    alpha3: 0.15
+    alpha4: 0.10
+    alpha5: 0.10
+
+    # ---- update thresholds ------------------------------------------------
+    # At 2 m/s the car covers 0.1 m in 50 ms. Updating this often is the point:
+    # sparse updates are what make AMCL feel jumpy.
+    update_min_d: 0.10             # [m]
+    update_min_a: 0.10             # [rad]
+    resample_interval: 1
+
+    # ---- laser model ------------------------------------------------------
+    # Likelihood field is smoother than beam and much cheaper. Beam's
+    # multi-modal per-ray model is exactly what produces AMCL's characteristic
+    # pose snapping on repetitive geometry.
+    laser_model_type: "likelihood_field"
+    laser_likelihood_max_dist: 2.0
+
+    # Matches Cartographer's TRAJECTORY_BUILDER_2D settings so both localizers
+    # consume identical data.
+    laser_min_range: 0.1
+    laser_max_range: 10.0
+
+    # 1021 rays per scan at 40 Hz. 180 beams is ample for a likelihood field
+    # and leaves CPU for everything else.
+    max_beams: 180
+
+    z_hit: 0.6
+    z_rand: 0.35
+    z_max: 0.05
+    z_short: 0.0
+    sigma_hit: 0.15
+
+    # ---- recovery ---------------------------------------------------------
+    # Global relocalization is what produced the 0.6 m flip in Cartographer.
+    # The same hazard exists here: on a track whose long bottom straight loses
+    # only ~22% of match score when shifted 0.6 m longitudinally, random
+    # particle injection can reseed into a wrong longitudinal solution.
+    # Disabled. The car starts from a known grid position.
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
+
+    # Publish map->odom continuously rather than only on update, so downstream
+    # TF lookups never fail between motion updates.
+    tf_broadcast: true
+    transform_tolerance: 0.5
+    save_pose_rate: 0.5
+
+    # ---- initial pose -----------------------------------------------------
+    # Taken from the bag's start pose. Change to wherever you actually grid up.
+    set_initial_pose: true
+    initial_pose:
+      x: -3.80
+      y: -0.16
+      z: 0.0
+      yaw: -0.133
+
+    always_reset_initial_pose: false
+    first_map_only: true
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    # Produced by: ros2 run nav2_map_server map_saver_cli -f <path>/racetrack
+    yaml_filename: "/home/seeed/f1tenth_ws/map/racetrack.yaml"
+    topic_name: "map"
+    frame_id: "map"

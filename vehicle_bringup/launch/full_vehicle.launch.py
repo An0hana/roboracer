@@ -77,7 +77,8 @@ def preflight(context, *args, **kwargs):
     if _is_true(context, LaunchConfiguration("launch_localization")):
         required_files.update(
             {
-                "Cartographer map": LaunchConfiguration("pbstream").perform(context),
+                "AMCL map": LaunchConfiguration("map").perform(context),
+                "AMCL config": LaunchConfiguration("amcl_config").perform(context),
                 "pose odometry config": LaunchConfiguration(
                     "pose_odom_config"
                 ).perform(context),
@@ -129,7 +130,8 @@ def preflight(context, *args, **kwargs):
 
 def generate_launch_description():
     race_line_file = LaunchConfiguration("race_line_file")
-    pbstream = LaunchConfiguration("pbstream")
+    map_yaml = LaunchConfiguration("map")
+    amcl_config = LaunchConfiguration("amcl_config")
     vesc_config = LaunchConfiguration("vesc_config")
     lidar_config = LaunchConfiguration("lidar_config")
     imu_config = LaunchConfiguration("imu_config")
@@ -243,14 +245,12 @@ def generate_launch_description():
     )
     localization = include_python(
         "robo_cartographer",
-        "localization.launch.py",
-        {"pbstream": pbstream},
-        IfCondition(launch_localization),
-    )
-    state_estimation = include_python(
-        "pose_odom",
-        "pose_odom.launch.py",
-        {"config_file": pose_odom_config},
+        "amcl_localization.launch.py",
+        {
+            "map": map_yaml,
+            "params_file": amcl_config,
+            "pose_odom_params": pose_odom_config,
+        },
         IfCondition(launch_localization),
     )
 
@@ -347,9 +347,16 @@ def generate_launch_description():
             description="Map-aligned race-line CSV",
         ),
         DeclareLaunchArgument(
-            "pbstream",
-            default_value="/home/seeed/f1tenth_ws/map/racetrack.pbstream",
-            description="Cartographer localization map",
+            "map",
+            default_value="/home/seeed/f1tenth_ws/map/racetrack.yaml",
+            description="AMCL occupancy-grid map YAML",
+        ),
+        DeclareLaunchArgument(
+            "amcl_config",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("robo_cartographer"), "config", "amcl.yaml"]
+            ),
+            description="AMCL and map_server parameter file",
         ),
         DeclareLaunchArgument(
             "vesc_config",
@@ -457,16 +464,17 @@ def generate_launch_description():
             foxglove,
             # Stage 1: raw wheel odometry diagnostics.
             TimerAction(period=1.0, actions=[wheel_odom]),
-            # Stage 2: map localization and required sensor transforms.
+            # Stage 2: AMCL, map server, controller-facing pose odometry and
+            # required sensor transforms. amcl_localization.launch.py owns the
+            # only pose_odom instance so map->odom and odom->base_link each
+            # have exactly one publisher.
             TimerAction(period=2.0, actions=[localization]),
-            # Stage 3: controller-facing map pose + VESC speed estimate.
-            TimerAction(period=4.0, actions=[state_estimation]),
-            # Stage 4: obstacle costmap, opponent tracking and behavior.
+            # Stage 3: obstacle costmap, opponent tracking and behavior.
             TimerAction(
                 period=6.0,
                 actions=[costmap, tracker, state_machine],
             ),
-            # Stage 5: control is deliberately last.
+            # Stage 4: control is deliberately last.
             TimerAction(
                 period=9.0,
                 actions=[mppi, safety],
