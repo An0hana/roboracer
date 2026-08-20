@@ -43,6 +43,13 @@ void updateFreshInputs(
   core.updateCommand(ControllerMode::kFtg, DriveCommand{0.8, -0.08}, now);
 }
 
+SafetyConfig immediateAebConfig()
+{
+  SafetyConfig config;
+  config.aeb_debounce_duration = 0.0;
+  return config;
+}
+
 TEST(SafetyCore, SelectedControllerIsForwardedWithoutAutomaticSwitch)
 {
   SafetyCore core;
@@ -55,9 +62,9 @@ TEST(SafetyCore, SelectedControllerIsForwardedWithoutAutomaticSwitch)
   EXPECT_NEAR(result.command.steering_angle, 0.12, 1e-12);
 }
 
-TEST(SafetyCore, AebOverridesFreshSelectedCommandAndRetainsSteering)
+TEST(SafetyCore, AebOverridesSpeedAndPassesThroughSelectedSteering)
 {
-  SafetyCore core;
+  SafetyCore core(immediateAebConfig());
   updateFreshInputs(core, 1.0, 1.0, 0.10);
   core.updateScan(singlePointScan(0.80, 0.0), 1.04);
 
@@ -66,7 +73,37 @@ TEST(SafetyCore, AebOverridesFreshSelectedCommandAndRetainsSteering)
   EXPECT_EQ(result.stop_reason, StopReason::kAeb);
   EXPECT_TRUE(result.aeb.emergency);
   EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
-  EXPECT_NEAR(result.command.steering_angle, 0.10, 1e-12);
+  EXPECT_NEAR(result.command.steering_angle, 0.12, 1e-12);
+}
+
+TEST(SafetyCore, PersistentAebHazardLatchesOnlyAfterDebounce)
+{
+  SafetyConfig config;
+  config.state_timeout = 1.0;
+  config.scan_timeout = 1.0;
+  config.command_timeout = 1.0;
+  config.aeb_debounce_duration = 0.50;
+  SafetyCore core(config);
+  core.updateState(1.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(0.70, 0.0), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.5, 0.0}, 1.0);
+
+  const ArbitrationResult first_hit = core.evaluate(1.01);
+  EXPECT_TRUE(first_hit.aeb.emergency);
+  EXPECT_FALSE(first_hit.aeb_latched);
+  EXPECT_EQ(first_hit.stop_reason, StopReason::kNone);
+  EXPECT_DOUBLE_EQ(first_hit.command.speed, 0.8);
+
+  const ArbitrationResult before_threshold = core.evaluate(1.50);
+  EXPECT_TRUE(before_threshold.aeb.emergency);
+  EXPECT_FALSE(before_threshold.aeb_latched);
+  EXPECT_EQ(before_threshold.stop_reason, StopReason::kNone);
+
+  const ArbitrationResult at_threshold = core.evaluate(1.51);
+  EXPECT_TRUE(at_threshold.aeb.emergency);
+  EXPECT_TRUE(at_threshold.aeb_latched);
+  EXPECT_EQ(at_threshold.stop_reason, StopReason::kAeb);
+  EXPECT_DOUBLE_EQ(at_threshold.command.speed, 0.0);
 }
 
 TEST(SafetyCore, AebReleaseRequiresContinuousClearHoldAndRampsResume)
@@ -76,6 +113,7 @@ TEST(SafetyCore, AebReleaseRequiresContinuousClearHoldAndRampsResume)
   config.aeb_release_check_speed = 1.50;
   config.aeb_resume_acceleration = 1.00;
   config.aeb_steering_recovery_enabled = false;
+  config.aeb_debounce_duration = 0.0;
   SafetyCore core(config);
   updateFreshInputs(core, 1.00, 1.0, 0.0);
   core.updateScan(singlePointScan(0.80, 0.0), 1.00);
@@ -115,6 +153,7 @@ TEST(SafetyCore, AebObstacleReappearanceResetsClearHold)
   SafetyConfig config;
   config.aeb_clear_hold_time = 0.20;
   config.aeb_steering_recovery_enabled = false;
+  config.aeb_debounce_duration = 0.0;
   SafetyCore core(config);
   updateFreshInputs(core, 1.00, 1.0, 0.0);
   core.updateScan(singlePointScan(0.80, 0.0), 1.00);
@@ -142,6 +181,7 @@ TEST(SafetyCore, ZeroUpstreamCommandDoesNotCancelAebResumeRamp)
   SafetyConfig config;
   config.aeb_clear_hold_time = 0.10;
   config.aeb_resume_acceleration = 1.00;
+  config.aeb_debounce_duration = 0.0;
   SafetyCore core(config);
   updateFreshInputs(core, 1.00, 1.0, 0.0);
   core.updateScan(singlePointScan(0.70, 0.0), 1.00);
@@ -164,29 +204,31 @@ TEST(SafetyCore, ZeroUpstreamCommandDoesNotCancelAebResumeRamp)
   EXPECT_LT(resumed.command.speed, 0.20);
 }
 
-TEST(SafetyCore, MovingEmergencyStopClampsRetainedSteering)
+TEST(SafetyCore, MovingEmergencyStopPassesThroughSelectedSteering)
 {
   SafetyConfig config;
   config.min_command_steering = -0.32;
   config.max_command_steering = 0.32;
+  config.aeb_debounce_duration = 0.0;
   SafetyCore core(config);
   core.updateState(1.0, 0.50, 1.0);
   core.updateScan(singlePointScan(0.31, 0.0), 1.0);
-  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.0}, 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.31}, 1.0);
 
   const ArbitrationResult result = core.evaluate(1.01);
   EXPECT_EQ(result.stop_reason, StopReason::kAeb);
   EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
-  EXPECT_DOUBLE_EQ(result.command.steering_angle, config.max_command_steering);
+  EXPECT_DOUBLE_EQ(result.command.steering_angle, 0.31);
   EXPECT_DOUBLE_EQ(core.currentSteeringAngle(), 0.50);
 }
 
-TEST(SafetyCore, StationaryEmergencyStopCentersAndClearsSteeringLatch)
+TEST(SafetyCore, StationaryEmergencyStopPassesThroughSelectedSteering)
 {
   SafetyConfig config;
   config.min_command_steering = -0.32;
   config.max_command_steering = 0.32;
   config.aeb_steering_recovery_enabled = false;
+  config.aeb_debounce_duration = 0.0;
   SafetyCore core(config);
   core.updateState(0.0, 0.30, 1.0);
   core.updateScan(singlePointScan(0.31, 0.0), 1.0);
@@ -195,7 +237,7 @@ TEST(SafetyCore, StationaryEmergencyStopCentersAndClearsSteeringLatch)
   const ArbitrationResult result = core.evaluate(1.01);
   EXPECT_EQ(result.stop_reason, StopReason::kAeb);
   EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
-  EXPECT_DOUBLE_EQ(result.command.steering_angle, 0.0);
+  EXPECT_DOUBLE_EQ(result.command.steering_angle, -0.10);
   EXPECT_DOUBLE_EQ(core.currentSteeringAngle(), 0.30);
 }
 
@@ -207,6 +249,7 @@ TEST(SafetyCore, AebSteeringRecoveryTurnsAtZeroSpeedBeforeRelease)
   config.aeb_clear_hold_time = 0.20;
   config.aeb_steering_recovery_rate = 0.80;
   config.aeb_steering_recovery_tolerance = 0.01;
+  config.aeb_debounce_duration = 0.0;
   SafetyCore core(config);
   core.updateState(1.0, 0.0, 1.00);
   core.updateScan(singlePointScan(0.70, 0.0), 1.00);
@@ -228,22 +271,15 @@ TEST(SafetyCore, AebSteeringRecoveryTurnsAtZeroSpeedBeforeRelease)
   core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.20}, 1.30);
   const ArbitrationResult at_target = core.evaluate(1.30);
   EXPECT_EQ(at_target.stop_reason, StopReason::kAeb);
-  // The command has reached 0.20 rad, but the effective wheel angle still
-  // follows the actuator response model and must not release in this cycle.
-  EXPECT_FALSE(at_target.aeb_steering_recovery_ready);
+  // The effective wheel angle has reached the selected steering target, but
+  // AEB still requires the configured continuous-clear hold before release.
+  EXPECT_TRUE(at_target.aeb_steering_recovery_ready);
   EXPECT_NEAR(at_target.command.steering_angle, 0.20, 1e-12);
 
   core.updateState(0.0, 0.0, 1.51, false);
   core.updateScan(clearScan(), 1.51);
   core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.20}, 1.51);
-  const ArbitrationResult effective_at_target = core.evaluate(1.51);
-  EXPECT_EQ(effective_at_target.stop_reason, StopReason::kAeb);
-  EXPECT_TRUE(effective_at_target.aeb_steering_recovery_ready);
-
-  core.updateState(0.0, 0.0, 1.72, false);
-  core.updateScan(clearScan(), 1.72);
-  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.20}, 1.72);
-  const ArbitrationResult released = core.evaluate(1.72);
+  const ArbitrationResult released = core.evaluate(1.51);
   EXPECT_EQ(released.stop_reason, StopReason::kNone);
   EXPECT_TRUE(released.aeb_resume_active);
   EXPECT_GT(released.command.speed, 0.0);
@@ -259,6 +295,51 @@ TEST(SafetyCore, ObstacleOutsideSweptVehicleDoesNotStop)
   EXPECT_FALSE(result.stopped());
   EXPECT_FALSE(result.aeb.emergency);
   EXPECT_DOUBLE_EQ(result.command.speed, 1.5);
+}
+
+TEST(SafetyCore, LateralGrazeBelowIntrusionThresholdDoesNotTriggerAeb)
+{
+  SafetyConfig config = immediateAebConfig();
+  config.aeb_lateral_intrusion_threshold = 0.050;
+  SafetyCore core(config);
+  core.updateState(1.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(0.40, 0.161), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_FALSE(result.aeb.emergency);
+  EXPECT_NEAR(result.aeb.maximum_lateral_intrusion, 0.049, 1e-9);
+  EXPECT_EQ(result.stop_reason, StopReason::kNone);
+}
+
+TEST(SafetyCore, LateralIntrusionBeyondThresholdTriggersAeb)
+{
+  SafetyConfig config = immediateAebConfig();
+  config.aeb_lateral_intrusion_threshold = 0.050;
+  SafetyCore core(config);
+  core.updateState(1.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(0.40, 0.159), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_TRUE(result.aeb.emergency);
+  EXPECT_NEAR(result.aeb.maximum_lateral_intrusion, 0.051, 1e-9);
+  EXPECT_EQ(result.stop_reason, StopReason::kAeb);
+}
+
+TEST(SafetyCore, LateralIntrusionAtThresholdTriggersAeb)
+{
+  SafetyConfig config = immediateAebConfig();
+  config.aeb_lateral_intrusion_threshold = 0.050;
+  SafetyCore core(config);
+  core.updateState(1.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(0.40, 0.160), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.0, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_TRUE(result.aeb.emergency);
+  EXPECT_NEAR(result.aeb.maximum_lateral_intrusion, 0.050, 1e-9);
+  EXPECT_EQ(result.stop_reason, StopReason::kAeb);
 }
 
 TEST(SafetyCore, BelowMinimumRangeReturnIsIgnoredRatherThanClampedIntoAebPath)
@@ -301,6 +382,7 @@ TEST(SafetyCore, ConfiguredVehicleSelfReturnDoesNotTriggerAeb)
 TEST(SafetyCore, SelfFilterDoesNotHideObstacleAheadOfVehicle)
 {
   SafetyConfig config;
+  config.aeb_debounce_duration = 0.0;
   config.self_filter_enabled = true;
   config.self_filter_min_x = 0.05;
   config.self_filter_max_x = 0.35;
@@ -320,14 +402,15 @@ TEST(SafetyCore, SelfFilterDoesNotHideObstacleAheadOfVehicle)
 TEST(SafetyCore, SteeringChangesTheAebSweptPath)
 {
   const ScanData obstacle = singlePointScan(0.81, 0.22);
+  const SafetyConfig config = immediateAebConfig();
 
-  SafetyCore straight_core;
+  SafetyCore straight_core(config);
   updateFreshInputs(straight_core, 1.0, 1.0, 0.0);
   straight_core.updateCommand(ControllerMode::kMppi, DriveCommand{1.5, 0.0}, 1.0);
   straight_core.updateScan(obstacle, 1.01);
   EXPECT_FALSE(straight_core.evaluate(1.02).aeb.emergency);
 
-  SafetyCore turning_core;
+  SafetyCore turning_core(config);
   updateFreshInputs(turning_core, 1.0, 1.0, 0.30);
   turning_core.updateScan(obstacle, 1.01);
   const ArbitrationResult turning_result = turning_core.evaluate(1.02);

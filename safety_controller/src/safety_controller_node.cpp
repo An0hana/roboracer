@@ -111,6 +111,8 @@ public:
     config.vehicle_width = declare_parameter<double>("vehicle_width", 0.320);
     config.rear_overhang = declare_parameter<double>("rear_overhang", 0.124);
     config.footprint_margin = declare_parameter<double>("footprint_margin", 0.050);
+    config.aeb_lateral_intrusion_threshold = declare_parameter<double>(
+      "aeb_lateral_intrusion_threshold", 0.050);
     config.lidar_offset_x = declare_parameter<double>("lidar_offset_x", 0.250);
     config.lidar_offset_y = declare_parameter<double>("lidar_offset_y", 0.0);
     config.self_filter_enabled = declare_parameter<bool>("self_filter_enabled", false);
@@ -378,6 +380,10 @@ private:
     status.values.push_back(
       diagnosticValue(
         "aeb_self_filtered_beams", std::to_string(result.aeb.self_filtered_beams)));
+    status.values.push_back(
+      diagnosticValue(
+        "max_lateral_intrusion_m",
+        std::to_string(result.aeb.maximum_lateral_intrusion)));
     status.values.push_back(
       diagnosticValue(
         "collision_path_distance_m", std::to_string(result.aeb.collision_path_distance)));

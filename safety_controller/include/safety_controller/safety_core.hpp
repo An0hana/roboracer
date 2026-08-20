@@ -82,6 +82,9 @@ struct SafetyConfig
   double vehicle_width{0.320};
   double rear_overhang{0.124};
   double footprint_margin{0.050};
+  // A scan point must penetrate this far into the laterally inflated
+  // footprint before it is considered an AEB collision.
+  double aeb_lateral_intrusion_threshold{0.050};
   double lidar_offset_x{0.250};
   double lidar_offset_y{0.0};
   bool self_filter_enabled{false};
@@ -117,6 +120,7 @@ struct AebAssessment
   bool emergency{false};
   std::size_t valid_beams{0U};
   std::size_t self_filtered_beams{0U};
+  double maximum_lateral_intrusion{0.0};
   double collision_path_distance{std::numeric_limits<double>::infinity()};
   double sweep_distance{0.0};
 };

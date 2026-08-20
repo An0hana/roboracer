@@ -13,6 +13,7 @@ namespace
 // round-trips through the ROS message as 0.20000000298, so allow only enough
 // tolerance to absorb wire-format rounding and clamp accepted values below.
 constexpr double kCommandEnvelopeTolerance = 1.0e-6;
+constexpr double kGeometryComparisonTolerance = 1.0e-9;
 
 bool finitePositive(double value)
 {
@@ -98,6 +99,9 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !finitePositive(config_.vehicle_width) || !finiteNonnegative(config_.rear_overhang) ||
     config_.rear_overhang >= config_.vehicle_length ||
     !finiteNonnegative(config_.footprint_margin) ||
+    !finiteNonnegative(config_.aeb_lateral_intrusion_threshold) ||
+    config_.aeb_lateral_intrusion_threshold >
+    0.5 * config_.vehicle_width + config_.footprint_margin ||
     !std::isfinite(config_.lidar_offset_x) || !std::isfinite(config_.lidar_offset_y) ||
     (config_.self_filter_enabled &&
     (!std::isfinite(config_.self_filter_min_x) ||
@@ -622,7 +626,15 @@ AebAssessment SafetyCore::assessAeb(
       const double sine = std::sin(pose.yaw);
       const double local_x = cosine * dx + sine * dy;
       const double local_y = -sine * dx + cosine * dy;
-      if (local_x >= min_x && local_x <= max_x && std::abs(local_y) <= max_abs_y) {
+      if (local_x < min_x || local_x > max_x) {
+        continue;
+      }
+      const double lateral_intrusion = max_abs_y - std::abs(local_y);
+      assessment.maximum_lateral_intrusion = std::max(
+        assessment.maximum_lateral_intrusion, std::max(0.0, lateral_intrusion));
+      if (lateral_intrusion + kGeometryComparisonTolerance >=
+        config_.aeb_lateral_intrusion_threshold)
+      {
         assessment.emergency = true;
         assessment.collision_path_distance = std::min(
           assessment.collision_path_distance, pose.distance);

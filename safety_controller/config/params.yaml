@@ -44,6 +44,9 @@ safety_controller:
     vehicle_width: 0.320
     rear_overhang: 0.124
     footprint_margin: 0.050
+    # Ignore points that only graze the inflated lateral footprint. AEB is
+    # raised after a point penetrates this far inward from that outer edge.
+    aeb_lateral_intrusion_threshold: 0.050
     lidar_offset_x: 0.250
     lidar_offset_y: 0.0
     # The real scanner sees two fixed parts of its body/protective mount.
