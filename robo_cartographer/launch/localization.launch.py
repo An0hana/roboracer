@@ -38,7 +38,6 @@ def generate_launch_description():
         arguments=[
             "-configuration_directory", config_dir,
             "-configuration_basename", "my_car_localization.lua",
-	    "-start_trajectory_with_default_topics=false",
             # This argument is half of what enables pure localization; the
             # other half is pure_localization_trimmer in the .lua.
             "-load_state_filename", LaunchConfiguration("pbstream"),
