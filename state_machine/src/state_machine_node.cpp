@@ -15,6 +15,9 @@
 #include <utility>
 #include <vector>
 
+#include "diagnostic_msgs/msg/diagnostic_array.hpp"
+#include "diagnostic_msgs/msg/diagnostic_status.hpp"
+#include "diagnostic_msgs/msg/key_value.hpp"
 #include "geometry_msgs/msg/quaternion.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -36,6 +39,7 @@ struct RaceLinePoint
   double x{0.0};
   double y{0.0};
   double yaw{0.0};
+  double curvature{0.0};
   double width_left{0.0};
   double width_right{0.0};
 };
@@ -76,11 +80,11 @@ std::vector<RaceLinePoint> loadRaceLine(const std::string & path)
       throw std::runtime_error("race line row has fewer than eight columns");
     }
     RaceLinePoint point{
-      values[0], values[1], values[2], values[3], values[6], values[7]};
+      values[0], values[1], values[2], values[3], values[4], values[6], values[7]};
     if (!finite(point.s) || !finite(point.x) || !finite(point.y) ||
-      !finite(point.yaw) || !finite(point.width_left) ||
-      !finite(point.width_right) || point.width_left <= 0.0 ||
-      point.width_right <= 0.0)
+      !finite(point.yaw) || !finite(point.curvature) ||
+      !finite(point.width_left) || !finite(point.width_right) ||
+      point.width_left <= 0.0 || point.width_right <= 0.0)
     {
       throw std::runtime_error("race line contains invalid values");
     }
@@ -99,8 +103,24 @@ const char * safetyName(SafetyState state)
     case SafetyState::READY: return "READY";
     case SafetyState::FAULT: return "FAULT";
     case SafetyState::STOP: return "STOP";
+    case SafetyState::RECOVERY: return "RECOVERY";
   }
   return "UNKNOWN";
+}
+
+bool isMppiFailure(const std::string & message)
+{
+  // CUDA backend / solver failures, the stationary warm-start stall, and the
+  // creep curvature gate ("curvature_infeasible": the turn needs more steering
+  // than max_steering, so MPPI stopped instead of sliding) are the planner-side
+  // evidence of being stuck.  "state_machine_stop:*" and "solver_failure_recovery"
+  // (creep is an active attempt to slide through, not a stall) are excluded.
+  if (message.rfind("cuda_", 0U) == 0U) {
+    return true;
+  }
+  return message == "solver_exception" || message == "solve_timeout" ||
+         message == "stuck_warm_start_recovery" ||
+         message == "curvature_infeasible";
 }
 
 const char * behaviorName(BehaviorState state)
@@ -142,6 +162,9 @@ public:
     const auto marker_topic = declare_parameter<std::string>(
       "marker_topic", "/state_machine/state_marker");
     const auto race_line_file = declare_parameter<std::string>("race_line_file", "");
+    const auto diagnostics_topic = declare_parameter<std::string>(
+      "diagnostics_topic", "/diagnostics");
+    diagnostics_timeout_ = declare_parameter<double>("diagnostics_timeout", 0.5);
     target_frame_ = declare_parameter<std::string>("target_frame", "map");
     state_timeout_ = declare_parameter<double>("state_timeout", 0.10);
     obstacle_timeout_ = declare_parameter<double>("obstacle_timeout", 0.20);
@@ -200,13 +223,40 @@ public:
       declare_parameter<double>("minimum_raceline_weight_scale", 0.25);
     config.maximum_safety_weight_scale =
       declare_parameter<double>("maximum_safety_weight_scale", 2.0);
+    config.stuck_speed_threshold =
+      declare_parameter<double>("stuck_speed_threshold", 0.05);
+    config.recovery_entry_time =
+      declare_parameter<double>("recovery_entry_time", 1.5);
+    config.curvature_fraction =
+      declare_parameter<double>("curvature_fraction", 0.85);
+    config.max_steering = declare_parameter<double>("max_steering", 0.32);
+    config.wheelbase = declare_parameter<double>("wheelbase", 0.324);
+    wheelbase_ = config.wheelbase;
+    config.reverse_speed = declare_parameter<double>("reverse_speed", 0.5);
+    config.reverse_steer_sign =
+      declare_parameter<double>("reverse_steer_sign", -1.0);
+    config.reverse_steer_fraction =
+      declare_parameter<double>("reverse_steer_fraction", 1.0);
+    config.recovery_min_reverse_distance =
+      declare_parameter<double>("recovery_min_reverse_distance", 0.3);
+    config.reverse_max_duration =
+      declare_parameter<double>("reverse_max_duration", 6.0);
+    config.reverse_max_distance =
+      declare_parameter<double>("reverse_max_distance", 1.8);
+    config.exit_clear_time = declare_parameter<double>("exit_clear_time", 1.0);
+    config.reentry_debounce = declare_parameter<double>("reentry_debounce", 4.0);
+    // Window (in raceline points) for averaging curvature when judging whether
+    // the car is stuck at a turn too sharp for the mechanical steering limit.
+    // Keep in sync with MPPI's creep.curvature_window_points.
+    curvature_window_points_ = declare_parameter<int>("curvature_window_points", 5);
 
     if (race_line_file.empty() || !finite(publish_rate) || publish_rate <= 0.0 ||
       !finite(state_timeout_) || state_timeout_ <= 0.0 ||
       !finite(obstacle_timeout_) || obstacle_timeout_ <= 0.0 ||
       !finite(costmap_timeout_) || costmap_timeout_ <= 0.0 ||
       occupied_threshold_ < 0 || occupied_threshold_ > 100 ||
-      minimum_confidence_samples_ < 1 || target_frame_.empty())
+      minimum_confidence_samples_ < 1 || target_frame_.empty() ||
+      curvature_window_points_ < 0)
     {
       throw std::invalid_argument("invalid state machine node configuration");
     }
@@ -233,6 +283,10 @@ public:
       [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) {
         latest_costmap_ = std::move(message);
       });
+    diagnostics_subscription_ =
+      create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+      diagnostics_topic, rclcpp::QoS(rclcpp::KeepLast(5)).reliable(),
+      std::bind(&StateMachineNode::diagnosticsCallback, this, std::placeholders::_1));
 
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / publish_rate));
@@ -252,6 +306,40 @@ private:
     return finite(age) && age >= 0.0 && age <= timeout;
   }
 
+  void diagnosticsCallback(
+    const diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr message)
+  {
+    const double now = get_clock()->now().seconds();
+    bool saw_mppi = false;
+    bool saw_safety = false;
+    bool mppi_fail = false;
+    bool aeb_latched = false;
+    for (const auto & status : message->status) {
+      const std::string & name = status.name;
+      if (name.find("mppi_controller") != std::string::npos &&
+        name.find(": controller") != std::string::npos)
+      {
+        saw_mppi = true;
+        mppi_fail = isMppiFailure(status.message);
+      } else if (name == "safety_controller/arbiter") {
+        saw_safety = true;
+        for (const auto & item : status.values) {
+          if (item.key == "aeb_latched") {
+            aeb_latched = item.value == "true";
+          }
+        }
+      }
+    }
+    if (saw_mppi) {
+      mppi_diag_time_ = now;
+      mppi_solver_failed_ = mppi_fail;
+    }
+    if (saw_safety) {
+      safety_diag_time_ = now;
+      aeb_latched_ = aeb_latched;
+    }
+  }
+
   std::size_t nearestRaceLine(double x, double y) const
   {
     std::size_t best = 0U;
@@ -266,6 +354,28 @@ private:
       }
     }
     return best;
+  }
+
+  // Mean |curvature| over the closed-loop window [center-half, center+half].
+  // Half-width is capped at the track midpoint so a large window never
+  // over-samples a short line.  Mirrors MPPI's creep gate (same default window)
+  // so the stuck gate and the creep gate judge the same turn segment.
+  double meanAbsCurvature(std::size_t center, std::size_t half_window) const
+  {
+    const std::size_t size = race_line_.size();
+    if (size == 0U) {
+      return 0.0;
+    }
+    const std::size_t half = std::min(half_window, size / 2U);
+    double sum = 0.0;
+    const std::size_t samples = 2U * half + 1U;
+    for (std::size_t offset = size - half; offset < size; ++offset) {
+      sum += std::abs(race_line_[(center + offset) % size].curvature);
+    }
+    for (std::size_t offset = 0U; offset <= half; ++offset) {
+      sum += std::abs(race_line_[(center + offset) % size].curvature);
+    }
+    return sum / static_cast<double>(samples);
   }
 
   bool occupiedNear(double world_x, double world_y, double radius) const
@@ -381,14 +491,33 @@ private:
       fresh(latest_costmap_->header.stamp, costmap_timeout_, now);
     observation.inputs_ready = odom_valid && obstacles_valid && costmap_valid;
 
+    // Planner / safety failure evidence.  The flags are latched booleans, so
+    // they expire when their publisher stops reporting (freshness guard).
+    const double now_seconds = now.seconds();
+    observation.mppi_solver_failed =
+      mppi_diag_time_ >= 0.0 &&
+      now_seconds - mppi_diag_time_ <= diagnostics_timeout_ && mppi_solver_failed_;
+    observation.aeb_latched =
+      safety_diag_time_ >= 0.0 &&
+      now_seconds - safety_diag_time_ <= diagnostics_timeout_ && aeb_latched_;
+
     double marker_x = 0.0;
     double marker_y = 0.0;
     if (odom_valid) {
       marker_x = latest_odom_->pose.pose.position.x;
       marker_y = latest_odom_->pose.pose.position.y;
       const double ego_yaw = yawFromQuaternion(latest_odom_->pose.pose.orientation);
-      observation.ego_speed =
-        std::max(0.0, latest_odom_->twist.twist.linear.x);
+      // Signed speed: negative while reversing. The recovery gate uses |v|.
+      observation.ego_speed = latest_odom_->twist.twist.linear.x;
+      const std::size_t nearest = nearestRaceLine(marker_x, marker_y);
+      // Curvature of a nearby window, not a single point: the stuck gate must
+      // judge the whole turn segment the car faces, not a locally-flat sample.
+      // Sign from the nearest point so reverse steering points away from the bend.
+      const double mean_abs_curv = meanAbsCurvature(
+        nearest, curvature_window_points_);
+      observation.required_steering = std::copysign(
+        std::atan(mean_abs_curv * wheelbase_),
+        race_line_[nearest].curvature);
       const double cosine = std::cos(ego_yaw);
       const double sine = std::sin(ego_yaw);
       double nearest_distance = std::numeric_limits<double>::infinity();
@@ -424,7 +553,6 @@ private:
         std::abs(observation.opponent_lateral) < 0.5;
 
       if (costmap_valid) {
-        const std::size_t nearest = nearestRaceLine(marker_x, marker_y);
         const double dt = last_update_time_.has_value() ?
           std::max(0.0, (now - *last_update_time_).seconds()) : 0.0;
         observation.track_confidence =
@@ -463,12 +591,17 @@ private:
     output.speed_scale = command.speed_scale;
     output.use_local_trajectory = false;
     output.fallback_ftg = false;
+    output.recovery_active = command.recovery_active;
+    output.recovery_speed = command.recovery_speed;
+    output.recovery_steering = command.recovery_steering;
     if (command.safety_state == SafetyState::INIT) {
       output.state = roboracer_msgs::msg::RaceState::INIT;
     } else if (command.safety_state == SafetyState::FAULT) {
       output.state = roboracer_msgs::msg::RaceState::FAULT;
     } else if (command.safety_state == SafetyState::STOP) {
       output.state = roboracer_msgs::msg::RaceState::STOP;
+    } else if (command.safety_state == SafetyState::RECOVERY) {
+      output.state = roboracer_msgs::msg::RaceState::RECOVERING;
     } else if (command.behavior_state == BehaviorState::TRAILING) {
       output.state = roboracer_msgs::msg::RaceState::TRAILING;
     } else if (command.behavior_state == BehaviorState::OVERTAKE) {
@@ -524,6 +657,13 @@ private:
   }
 
   std::string target_frame_;
+  double wheelbase_{0.324};
+  int curvature_window_points_{5};
+  double diagnostics_timeout_{0.5};
+  bool mppi_solver_failed_{false};
+  bool aeb_latched_{false};
+  double mppi_diag_time_{-1.0e9};
+  double safety_diag_time_{-1.0e9};
   double state_timeout_{0.10};
   double obstacle_timeout_{0.20};
   double costmap_timeout_{0.12};
@@ -550,6 +690,8 @@ private:
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_subscription_;
   rclcpp::Subscription<roboracer_msgs::msg::TrackedObstacleArray>::SharedPtr
     obstacles_subscription_;
+  rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
+    diagnostics_subscription_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

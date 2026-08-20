@@ -511,5 +511,97 @@ TEST(SafetyCore, Float32EnvelopeRoundoffIsAcceptedAndClamped)
   EXPECT_DOUBLE_EQ(result.command.steering_angle, config.min_command_steering);
 }
 
+TEST(SafetyCore, RecoveryExecutesReverseCommand)
+{
+  SafetyCore core;
+  updateFreshInputs(core, 1.0);
+  core.updateRaceState(true, 0.5, -0.32, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_FALSE(result.stopped());
+  EXPECT_DOUBLE_EQ(result.command.speed, -0.5);
+  EXPECT_DOUBLE_EQ(result.command.steering_angle, -0.32);
+  EXPECT_FALSE(result.aeb_latched);
+}
+
+TEST(SafetyCore, RecoveryHoldsWhenRearBoxBlocked)
+{
+  SafetyCore core;
+  core.updateState(0.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(-0.80, 0.0), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.5, 0.12}, 1.0);
+  core.updateRaceState(true, 0.5, -0.32, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_FALSE(result.stopped());
+  EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
+  EXPECT_DOUBLE_EQ(result.command.steering_angle, -0.32);
+}
+
+TEST(SafetyCore, RecoveryContinuesWhenRearBoxClear)
+{
+  SafetyCore core;
+  core.updateState(0.0, 0.0, 1.0);
+  // Point behind the car but |y| outside the narrow rear box.
+  core.updateScan(singlePointScan(-0.80, 0.50), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.5, 0.12}, 1.0);
+  core.updateRaceState(true, 0.5, -0.32, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_FALSE(result.stopped());
+  EXPECT_DOUBLE_EQ(result.command.speed, -0.5);
+}
+
+TEST(SafetyCore, RecoveryClearsAebLatchOnEntry)
+{
+  SafetyConfig config;
+  config.aeb_debounce_duration = 0.0;
+  config.aeb_clear_hold_time = 0.20;
+  config.aeb_steering_recovery_enabled = false;
+  SafetyCore core(config);
+  updateFreshInputs(core, 1.00, 1.0, 0.0);
+  core.updateScan(singlePointScan(0.80, 0.0), 1.00);
+
+  const ArbitrationResult triggered = core.evaluate(1.01);
+  ASSERT_EQ(triggered.stop_reason, StopReason::kAeb);
+  EXPECT_TRUE(triggered.aeb_latched);
+
+  // Entering recovery drops the forward AEB latch so the state machine's
+  // exit gate can observe it clearing, and issues the reverse command.
+  updateFreshInputs(core, 1.02, 0.0, 0.0);
+  core.updateScan(clearScan(), 1.02);
+  core.updateRaceState(true, 0.5, -0.32, 1.02);
+  const ArbitrationResult recovering = core.evaluate(1.03);
+  EXPECT_EQ(recovering.stop_reason, StopReason::kNone);
+  EXPECT_FALSE(recovering.aeb_latched);
+  EXPECT_DOUBLE_EQ(recovering.command.speed, -0.5);
+  EXPECT_DOUBLE_EQ(recovering.command.steering_angle, -0.32);
+}
+
+TEST(SafetyCore, RecoveryIgnoredWhenRaceStateStale)
+{
+  SafetyCore core;
+  updateFreshInputs(core, 1.0);
+  core.updateRaceState(true, 0.5, -0.32, 1.0);
+  // Fresh odometry/scan/command, but the race state aged out.
+  updateFreshInputs(core, 2.0);
+
+  const ArbitrationResult result = core.evaluate(2.01);
+  EXPECT_EQ(result.stop_reason, StopReason::kNone);
+  EXPECT_DOUBLE_EQ(result.command.speed, 1.5);
+}
+
+TEST(SafetyCore, RecoveryFallsThroughToStopWhenScanStale)
+{
+  SafetyCore core;
+  core.updateState(0.0, 0.0, 1.95);
+  core.updateScan(clearScan(), 1.0);  // stale scan
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{1.5, 0.12}, 1.95);
+  core.updateRaceState(true, 0.5, -0.32, 1.95);
+
+  const ArbitrationResult result = core.evaluate(2.0);
+  EXPECT_EQ(result.stop_reason, StopReason::kScanTimeout);
+}
+
 }  // namespace
 }  // namespace safety_controller

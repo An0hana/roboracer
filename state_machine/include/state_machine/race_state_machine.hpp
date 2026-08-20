@@ -15,7 +15,8 @@ enum class SafetyState : std::uint8_t
   INIT = 0,
   READY = 1,
   FAULT = 2,
-  STOP = 3
+  STOP = 3,
+  RECOVERY = 4
 };
 
 enum class BehaviorState : std::uint8_t
@@ -53,6 +54,27 @@ struct StateMachineConfig
   double degraded_speed_scale{0.55};
   double minimum_raceline_weight_scale{0.25};
   double maximum_safety_weight_scale{2.0};
+
+  // Reverse-recovery gate: the car is considered stuck when it has been
+  // stationary long enough while the planner is failing / AEB is latched and
+  // the raceline demands more steering than the mechanical limit.
+  double stuck_speed_threshold{0.05};
+  double recovery_entry_time{1.5};
+  double curvature_fraction{0.85};
+  double max_steering{0.32};
+  double wheelbase{0.324};
+
+  // Reverse command issued by the safety layer while recovering.
+  double reverse_speed{0.5};
+  double reverse_steer_sign{-1.0};
+  double reverse_steer_fraction{1.0};
+
+  // Recovery exit gate.
+  double recovery_min_reverse_distance{0.3};
+  double reverse_max_duration{6.0};
+  double reverse_max_distance{1.8};
+  double exit_clear_time{1.0};
+  double reentry_debounce{4.0};
 };
 
 struct StateObservation
@@ -70,6 +92,13 @@ struct StateObservation
   double left_clearance_score{0.0};
   double right_clearance_score{0.0};
   double track_confidence{1.0};
+
+  // Planner / safety failure evidence consumed by the recovery gate.
+  bool mppi_solver_failed{false};
+  bool aeb_latched{false};
+  // Steering angle (rad) the raceline needs at the current pose, computed by
+  // the node as atan(nearest_curvature * wheelbase).
+  double required_steering{0.0};
 };
 
 struct StateCommand
@@ -83,6 +112,9 @@ struct StateCommand
   double safety_weight_scale{1.0};
   double lateral_reference_offset{0.0};
   bool stop_requested{true};
+  bool recovery_active{false};
+  double recovery_speed{0.0};
+  double recovery_steering{0.0};
   std::string reason{"waiting_for_inputs"};
 };
 
@@ -123,6 +155,8 @@ private:
     double now);
   void clearPendingTransition();
   [[nodiscard]] StateCommand command(double now) const;
+  [[nodiscard]] bool stuckAtCurvatureLimit(
+    const StateObservation & observation) const;
 
   StateMachineConfig config_;
   SafetyState safety_state_{SafetyState::INIT};
@@ -139,6 +173,15 @@ private:
   std::optional<int> pending_state_;
   std::string pending_reason_;
   double pending_since_{0.0};
+
+  // Reverse-recovery bookkeeping.
+  double required_steering_{0.0};
+  std::optional<double> stuck_since_;
+  double recovery_enter_time_{0.0};
+  double reverse_distance_{0.0};
+  std::optional<double> recovery_clear_since_;
+  double reentry_available_until_{0.0};
+  double recovery_steering_{0.0};
 };
 
 }  // namespace state_machine

@@ -197,6 +197,94 @@ TEST(RaceLine, RejectsWrongSchema)
   std::remove(path.c_str());
 }
 
+namespace
+{
+
+// A closed 160-point circle (segment spacing ~0.196 m, under the 0.25 m
+// limit) whose per-waypoint curvature is set by a 160-element pattern.
+// Geometry stays a valid circle so fromWaypoints accepts it; only curvature
+// values are synthetic.
+RaceLine makeCurvatureLine(const std::vector<double> & curvatures)
+{
+  constexpr std::size_t count = 160U;
+  constexpr double radius = 5.0;
+  std::vector<Waypoint> points;
+  points.reserve(count);
+  for (std::size_t index = 0U; index < count; ++index) {
+    const double theta = 2.0 * kPi * static_cast<double>(index) /
+      static_cast<double>(count);
+    points.push_back(Waypoint{
+      radius * theta,
+      radius * std::cos(theta),
+      radius * std::sin(theta),
+      normalizeAngle(theta + kPi * 0.5),
+      curvatures[index],
+      1.2,
+      1.0,
+      1.0});
+  }
+  return RaceLine::fromWaypoints(std::move(points));
+}
+
+std::vector<double> curvatureRamp()
+{
+  std::vector<double> values(160U);
+  for (std::size_t index = 0U; index < values.size(); ++index) {
+    values[index] = static_cast<double>(index + 1U);
+  }
+  return values;
+}
+
+std::vector<double> curvatureAlternatingSign()
+{
+  std::vector<double> values(160U);
+  for (std::size_t index = 0U; index < values.size(); ++index) {
+    values[index] = (index % 2U == 0U) ? -static_cast<double>(index + 1U) :
+      static_cast<double>(index + 1U);
+  }
+  return values;
+}
+
+}  // namespace
+
+TEST(RaceLine, MeanAbsCurvatureIsUniformOnCircle)
+{
+  // makeCircle() has constant curvature ±1/radius = ±0.2, so any window averages
+  // to the same magnitude.
+  const RaceLine line = makeCircle(false, 1.0);
+  EXPECT_NEAR(line.meanAbsCurvature(0U, 0U), 0.2, 1.0e-9);
+  EXPECT_NEAR(line.meanAbsCurvature(40U, 5U), 0.2, 1.0e-9);
+  EXPECT_NEAR(line.meanAbsCurvature(159U, 5U), 0.2, 1.0e-9);
+  const RaceLine mirrored = makeCircle(true, 1.0);
+  EXPECT_NEAR(mirrored.meanAbsCurvature(0U, 5U), 0.2, 1.0e-9);
+}
+
+TEST(RaceLine, MeanAbsCurvatureWrapsAroundTrackEnd)
+{
+  // curvatures[i] = i+1 over 160 points.  center=0, half=1 wraps to {159, 0, 1}.
+  const RaceLine line = makeCurvatureLine(curvatureRamp());
+  EXPECT_NEAR(line.meanAbsCurvature(0U, 1U), (160.0 + 1.0 + 2.0) / 3.0, 1.0e-9);
+  EXPECT_NEAR(line.meanAbsCurvature(0U, 2U), (159.0 + 160.0 + 1.0 + 2.0 + 3.0) / 5.0, 1.0e-9);
+  // center on the last point wraps forward to index 0.
+  EXPECT_NEAR(line.meanAbsCurvature(159U, 1U), (159.0 + 160.0 + 1.0) / 3.0, 1.0e-9);
+  // Interior window, no wrapping.
+  EXPECT_NEAR(line.meanAbsCurvature(5U, 1U), (5.0 + 6.0 + 7.0) / 3.0, 1.0e-9);
+  // half_window == 0 collapses to the single point.
+  EXPECT_NEAR(line.meanAbsCurvature(5U, 0U), 6.0, 1.0e-9);
+}
+
+TEST(RaceLine, MeanAbsCurvatureAveragesMagnitudes)
+{
+  // Alternating-sign curvatures: the average uses |κ|, not κ.
+  const RaceLine line = makeCurvatureLine(curvatureAlternatingSign());
+  // idx 159 = +160, idx 0 = -1, idx 1 = +2.
+  EXPECT_NEAR(line.meanAbsCurvature(0U, 1U), (160.0 + 1.0 + 2.0) / 3.0, 1.0e-9);
+  // idx 5 = -6.
+  EXPECT_NEAR(line.meanAbsCurvature(5U, 0U), 6.0, 1.0e-9);
+  // idx 3..7 = -4, +5, -6, +7, -8 -> magnitudes 4,5,6,7,8.
+  EXPECT_NEAR(line.meanAbsCurvature(5U, 2U), (4.0 + 5.0 + 6.0 + 7.0 + 8.0) / 5.0, 1.0e-9);
+}
+
 TEST(DistanceField, RepresentsObstaclesUnknownCellsAndRotatedOrigins)
 {
   std::vector<std::int8_t> grid(25U, 0);

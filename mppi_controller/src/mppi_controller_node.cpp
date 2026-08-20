@@ -193,6 +193,12 @@ private:
     declare_parameter<double>("vehicle.min_speed", 0.0);
     declare_parameter<double>("vehicle.max_speed", 2.0);
 
+    // Solver-failure creep: gate the forward slide on the raceline curvature
+    // averaged over a window of waypoints.  Turns that need more steering than
+    // max_steering are physically impassable, so stop instead of creeping.
+    declare_parameter<int>("creep.curvature_window_points", 5);
+    declare_parameter<double>("creep.curvature_fraction", 1.0);
+
     declare_parameter<double>("weights.lateral", 12.0);
     declare_parameter<double>("weights.heading", 8.0);
     declare_parameter<double>("weights.lag", 1.0);
@@ -270,6 +276,18 @@ private:
       vehicle_.max_acceleration = parameter<double>("vehicle.max_acceleration");
       vehicle_.min_speed = parameter<double>("vehicle.min_speed");
       vehicle_.max_speed = parameter<double>("vehicle.max_speed");
+      creep_curvature_window_points_ =
+        parameter<int>("creep.curvature_window_points");
+      const double creep_curvature_fraction =
+        parameter<double>("creep.curvature_fraction");
+      if (creep_curvature_window_points_ < 0 ||
+        !std::isfinite(creep_curvature_fraction) ||
+        creep_curvature_fraction <= 0.0)
+      {
+        error = "invalid creep curvature gate configuration";
+        return false;
+      }
+      creep_curvature_limit_ = creep_curvature_fraction * vehicle_.max_steering;
       vehicle_.max_lateral_acceleration =
         parameter<double>("mppi.max_lateral_acceleration");
       model_ = std::make_unique<BicycleModel>(vehicle_);
@@ -1085,6 +1103,22 @@ private:
             recovery_state, std::nullopt, mppi_.nearest_search_radius);
           const Waypoint & ref = race_line_->atWrapped(
             static_cast<std::ptrdiff_t>(proj.index));
+
+          // Curvature gate: sliding forward at full lock is only useful while
+          // the raceline turn stays within the mechanical steering limit.  If
+          // the average curvature over the nearby window demands more, creeping
+          // is futile — stop so reverse-recovery can take over.
+          const double mean_abs_curv = race_line_->meanAbsCurvature(
+            proj.index, static_cast<std::size_t>(creep_curvature_window_points_));
+          if (std::atan(vehicle_.wheelbase * mean_abs_curv) >
+            creep_curvature_limit_)
+          {
+            publishStop(
+              "curvature_infeasible",
+              diagnostic_msgs::msg::DiagnosticStatus::WARN, state_age);
+            return;
+          }
+
           const double lat_err = proj.lateral_error;
           const double desired_heading = normalizeAngle(
             ref.yaw - std::atan(1.5 * lat_err));
@@ -1488,6 +1522,9 @@ private:
   MppiConfig mppi_{};
   VehicleConfig vehicle_{};
   std::optional<RaceLine> race_line_;
+  // Creep curvature gate (solver-failure recovery path).
+  int creep_curvature_window_points_{5};
+  double creep_curvature_limit_{0.32};
   std::unique_ptr<MppiBackend> backend_;
   std::unique_ptr<BicycleModel> model_;
   std::string race_line_file_;
