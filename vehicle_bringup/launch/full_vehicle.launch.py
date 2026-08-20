@@ -390,8 +390,16 @@ def generate_launch_description():
             default_value="1.5",
             description="Hard speed limit shared by MPPI and safety controller [m/s]",
         ),
-        DeclareLaunchArgument("min_steering", default_value="-0.32"),
-        DeclareLaunchArgument("max_steering", default_value="0.32"),
+        DeclareLaunchArgument(
+            "min_steering",
+            default_value="-0.404",
+            description="Calibrated right steering limit [rad]",
+        ),
+        DeclareLaunchArgument(
+            "max_steering",
+            default_value="0.381",
+            description="Calibrated left steering limit [rad]",
+        ),
         DeclareLaunchArgument("launch_lidar", default_value="true"),
         DeclareLaunchArgument("launch_imu", default_value="true"),
         DeclareLaunchArgument("launch_vesc", default_value="true"),
