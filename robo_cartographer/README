@@ -20,7 +20,7 @@ ros2 service call /finish_trajectory cartographer_ros_msgs/srv/FinishTrajectory 
 
 ros2 service call /write_state \
   cartographer_ros_msgs/srv/WriteState \
-  "{filename: '~/f1tenth_ws/maps/racetrack.pbstream', include_unfinished_submaps: true}"
+  "{filename: 'racetrack.pbstream', include_unfinished_submaps: true}"
 ```
 ## generating pgm+yaml map
 ```bash

@@ -482,6 +482,66 @@ TEST(SafetyCore, FiniteCommandOutsideIndependentEnvelopeStops)
   EXPECT_EQ(core.evaluate(1.03).stop_reason, StopReason::kInvalidCommand);
 }
 
+TEST(SafetyCore, ReverseRequiresFreshRecoveryAuthorization)
+{
+  SafetyConfig config;
+  config.recovery_state_timeout = 0.10;
+  SafetyCore core(config);
+  core.updateState(0.0, 0.0, 1.0);
+  core.updateScan(clearScan(), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.25, 0.0}, 1.0);
+
+  ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_EQ(result.stop_reason, StopReason::kInvalidCommand);
+  EXPECT_FALSE(result.recovery_reverse_authorized);
+
+  core.updateRecoveryAuthorization(true, 1.02);
+  core.updateState(0.0, 0.0, 1.02);
+  core.updateScan(clearScan(), 1.02);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.25, 0.0}, 1.02);
+  result = core.evaluate(1.03);
+  EXPECT_EQ(result.stop_reason, StopReason::kNone);
+  EXPECT_TRUE(result.recovery_reverse_authorized);
+  EXPECT_DOUBLE_EQ(result.command.speed, -0.25);
+  EXPECT_DOUBLE_EQ(result.active_min_command_speed, config.recovery_min_command_speed);
+
+  // Refresh every required input except the authorization. A stale recovery
+  // state must fail closed even while MPPI continues publishing reverse.
+  core.updateState(0.0, 0.0, 1.20);
+  core.updateScan(clearScan(), 1.20);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.25, 0.0}, 1.20);
+  result = core.evaluate(1.21);
+  EXPECT_EQ(result.stop_reason, StopReason::kInvalidCommand);
+  EXPECT_FALSE(result.recovery_reverse_authorized);
+}
+
+TEST(SafetyCore, RecoveryAuthorizationNeverAllowsFtgReverse)
+{
+  SafetyCore core(SafetyConfig{}, ControllerMode::kFtg);
+  core.updateRecoveryAuthorization(true, 1.0);
+  core.updateState(0.0, 0.0, 1.0);
+  core.updateScan(clearScan(), 1.0);
+  core.updateCommand(ControllerMode::kFtg, DriveCommand{-0.25, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_EQ(result.stop_reason, StopReason::kInvalidCommand);
+  EXPECT_FALSE(result.recovery_reverse_authorized);
+}
+
+TEST(SafetyCore, SoftAebNeverTurnsReverseIntoForwardPropulsion)
+{
+  SafetyCore core;
+  core.updateRecoveryAuthorization(true, 1.0);
+  core.updateState(-0.25, 0.0, 1.0);
+  core.updateScan(singlePointScan(-0.20, 0.0), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.25, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  ASSERT_TRUE(result.aeb.emergency);
+  EXPECT_EQ(result.stop_reason, StopReason::kNone);
+  EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
+}
+
 TEST(SafetyCore, Float32EnvelopeRoundoffIsAcceptedAndClamped)
 {
   SafetyConfig config;

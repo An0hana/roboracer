@@ -75,6 +75,10 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !std::isfinite(config_.min_command_speed) ||
     !std::isfinite(config_.max_command_speed) ||
     config_.min_command_speed > config_.max_command_speed ||
+    !std::isfinite(config_.recovery_min_command_speed) ||
+    config_.recovery_min_command_speed >= 0.0 ||
+    config_.recovery_min_command_speed > config_.min_command_speed ||
+    !finitePositive(config_.recovery_state_timeout) ||
     !std::isfinite(config_.min_command_steering) ||
     !std::isfinite(config_.max_command_steering) ||
     config_.min_command_steering >= config_.max_command_steering ||
@@ -161,6 +165,15 @@ void SafetyCore::updateCommand(
   target.received = true;
 }
 
+void SafetyCore::updateRecoveryAuthorization(
+  bool reverse_authorized, double now_seconds)
+{
+  recovery_state_received_ = true;
+  recovery_state_stamp_ = now_seconds;
+  recovery_state_valid_ = std::isfinite(now_seconds);
+  recovery_reverse_authorized_ = recovery_state_valid_ && reverse_authorized;
+}
+
 bool SafetyCore::requestMode(ControllerMode requested, double now_seconds)
 {
   if (requested == selected_mode_) {
@@ -184,6 +197,13 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
 
   const TimedCommand & selected_command = commandFor(selected_mode_);
   result.command_age = age(now_seconds, selected_command.stamp, selected_command.received);
+  result.recovery_state_age = age(
+    now_seconds, recovery_state_stamp_, recovery_state_received_ && recovery_state_valid_);
+  result.recovery_reverse_authorized =
+    selected_mode_ == ControllerMode::kMppi && recovery_reverse_authorized_ &&
+    result.recovery_state_age <= config_.recovery_state_timeout;
+  result.active_min_command_speed = result.recovery_reverse_authorized ?
+    config_.recovery_min_command_speed : config_.min_command_speed;
 
   double elapsed = 0.0;
   if (last_evaluation_time_.has_value() &&
@@ -357,7 +377,7 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     result.stop_reason = StopReason::kCommandTimeout;
   } else if (!selected_command.command.valid() ||
     selected_command.command.speed <
-    config_.min_command_speed - kCommandEnvelopeTolerance ||
+    result.active_min_command_speed - kCommandEnvelopeTolerance ||
     selected_command.command.speed >
     config_.max_command_speed + kCommandEnvelopeTolerance ||
     selected_command.command.steering_angle <
@@ -380,18 +400,23 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
   } else {
     result.command = selected_command.command;
     result.command.speed = std::clamp(
-      result.command.speed, config_.min_command_speed, config_.max_command_speed);
+      result.command.speed, result.active_min_command_speed, config_.max_command_speed);
     result.command.steering_angle = std::clamp(
       result.command.steering_angle,
       config_.min_command_steering, config_.max_command_steering);
     if (aeb_soft) {
-      result.command.speed = 0.8;
+      // A reverse hazard must never be converted into forward propulsion.
+      // Forward commands retain the existing soft cap; reverse commands stop.
+      result.command.speed = result.command.speed < 0.0 ?
+        0.0 : std::min(result.command.speed, 0.8);
     }
     if (aeb_resume_active_) {
       aeb_resume_speed_limit_ = std::min(
         config_.max_command_speed,
         aeb_resume_speed_limit_ + config_.aeb_resume_acceleration * elapsed);
-      result.command.speed = std::min(result.command.speed, aeb_resume_speed_limit_);
+      result.command.speed = result.command.speed < 0.0 ?
+        std::max(result.command.speed, -aeb_resume_speed_limit_) :
+        std::min(result.command.speed, aeb_resume_speed_limit_);
       result.aeb_resume_speed_limit = aeb_resume_speed_limit_;
       // Do not end the ramp merely because the upstream controller happens
       // to publish zero during the AEB braking transient. Keep the limiter

@@ -119,8 +119,8 @@ mppi_controller:
       rear_overhang: 0.124
       width: 0.320
       safety_margin: 0.05
-      min_steering: -0.32
-      max_steering: 0.32
+      min_steering: -0.40
+      max_steering: 0.38
       min_steering_rate: -1.5
       max_steering_rate: 1.5
       steering_response_time: 0.15

@@ -61,8 +61,8 @@ struct VehicleConfig
   double rear_overhang{0.124};
   double width{0.320};
   double safety_margin{0.05};
-  double min_steering{-0.32};
-  double max_steering{0.32};
+  double min_steering{-0.40};
+  double max_steering{0.38};
   double min_steering_rate{-1.5};
   double max_steering_rate{1.5};
   // Identified steering actuator/tyre model. The command can move at the
