@@ -12,6 +12,7 @@ def generate_launch_description():
     )
     params_file = LaunchConfiguration("params_file")
     odom_topic = LaunchConfiguration("odom_topic")
+    command_topic = LaunchConfiguration("command_topic")
     race_line_file = LaunchConfiguration("race_line_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
 
@@ -21,6 +22,11 @@ def generate_launch_description():
                 "odom_topic",
                 default_value="/ego_racecar/odom",
                 description="Vehicle localization topic",
+            ),
+            DeclareLaunchArgument(
+                "command_topic",
+                default_value="/control/mppi_cmd",
+                description="MPPI command observed for stuck detection",
             ),
             DeclareLaunchArgument(
                 "race_line_file",
@@ -45,6 +51,7 @@ def generate_launch_description():
                     params_file,
                     {
                         "odom_topic": odom_topic,
+                        "command_topic": command_topic,
                         "race_line_file": race_line_file,
                         "use_sim_time": use_sim_time,
                     },

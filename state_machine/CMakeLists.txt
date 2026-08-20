@@ -6,6 +6,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ackermann_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -25,6 +26,7 @@ target_compile_features(state_machine_node PUBLIC cxx_std_17)
 target_link_libraries(state_machine_node state_machine_core)
 ament_target_dependencies(
   state_machine_node
+  ackermann_msgs
   geometry_msgs
   nav_msgs
   rclcpp

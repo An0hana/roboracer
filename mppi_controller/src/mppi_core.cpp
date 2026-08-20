@@ -1160,11 +1160,18 @@ CostBreakdown CpuMppiBackend::evaluateTrajectory(
 double CpuMppiBackend::footprintClearance(
   const State & state, const DistanceField * distance_field) const
 {
+  return vehicleFootprintClearance(state, vehicle_, distance_field);
+}
+
+double vehicleFootprintClearance(
+  const State & state, const VehicleConfig & vehicle,
+  const DistanceField * distance_field)
+{
   if (distance_field == nullptr || !distance_field->valid()) {
     return std::numeric_limits<double>::infinity();
   }
-  const double rear = -vehicle_.rear_overhang;
-  const double half_width = vehicle_.width * 0.5;
+  const double rear = -vehicle.rear_overhang;
+  const double half_width = vehicle.width * 0.5;
   const double cosine = std::cos(state.yaw);
   const double sine = std::sin(state.yaw);
   // Cover the complete rectangle by a chain of circumscribed disks. Every point in
@@ -1172,8 +1179,8 @@ double CpuMppiBackend::footprintClearance(
   // a conservative clearance certificate rather than sparse point sampling.
   const double target_segment_length = std::max(0.02, half_width);
   const std::size_t segment_count = std::max<std::size_t>(
-    1U, static_cast<std::size_t>(std::ceil(vehicle_.length / target_segment_length)));
-  const double segment_length = vehicle_.length / static_cast<double>(segment_count);
+    1U, static_cast<std::size_t>(std::ceil(vehicle.length / target_segment_length)));
+  const double segment_length = vehicle.length / static_cast<double>(segment_count);
   const double cover_radius = std::hypot(half_width, segment_length * 0.5);
   double minimum = std::numeric_limits<double>::infinity();
   for (std::size_t segment = 0U; segment < segment_count; ++segment) {

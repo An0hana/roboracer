@@ -55,6 +55,7 @@ def generate_launch_description():
         {
             "params_file": state_machine_params_file,
             "odom_topic": odom_topic,
+            "command_topic": command_topic,
             "race_line_file": race_line_file,
             "use_sim_time": use_sim_time,
         },

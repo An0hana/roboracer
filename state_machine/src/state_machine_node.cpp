@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
 #include "geometry_msgs/msg/quaternion.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -109,6 +110,17 @@ const char * behaviorName(BehaviorState state)
     case BehaviorState::RACING: return "RACING";
     case BehaviorState::TRAILING: return "TRAILING";
     case BehaviorState::OVERTAKE: return "OVERTAKE";
+    case BehaviorState::RECOVERY: return "RECOVERY";
+  }
+  return "UNKNOWN";
+}
+
+const char * recoveryPhaseName(RecoveryPhase phase)
+{
+  switch (phase) {
+    case RecoveryPhase::NONE: return "NONE";
+    case RecoveryPhase::REVERSE: return "REVERSE";
+    case RecoveryPhase::SETTLE: return "SETTLE";
   }
   return "UNKNOWN";
 }
@@ -137,6 +149,8 @@ public:
       "odom_topic", "/ego_racecar/odom");
     const auto costmap_topic = declare_parameter<std::string>(
       "costmap_topic", "/perception/local_costmap");
+    const auto command_topic = declare_parameter<std::string>(
+      "command_topic", "/control/mppi_cmd");
     const auto output_topic = declare_parameter<std::string>(
       "output_topic", "/state_machine/state");
     const auto marker_topic = declare_parameter<std::string>(
@@ -146,6 +160,7 @@ public:
     state_timeout_ = declare_parameter<double>("state_timeout", 0.10);
     obstacle_timeout_ = declare_parameter<double>("obstacle_timeout", 0.20);
     costmap_timeout_ = declare_parameter<double>("costmap_timeout", 0.12);
+    command_timeout_ = declare_parameter<double>("command_timeout", 0.20);
     minimum_obstacle_confidence_ =
       declare_parameter<double>("minimum_obstacle_confidence", 0.25);
     occupied_threshold_ = declare_parameter<int>("occupied_threshold", 50);
@@ -200,13 +215,41 @@ public:
       declare_parameter<double>("minimum_raceline_weight_scale", 0.25);
     config.maximum_safety_weight_scale =
       declare_parameter<double>("maximum_safety_weight_scale", 2.0);
+    config.stuck_command_speed_threshold =
+      declare_parameter<double>("stuck_command_speed_threshold", 0.20);
+    config.stuck_speed_threshold =
+      declare_parameter<double>("stuck_speed_threshold", 0.05);
+    config.stuck_confirmation =
+      declare_parameter<double>("stuck_confirmation", 1.50);
+    config.recovery_reverse_distance =
+      declare_parameter<double>("recovery_reverse_distance", 0.40);
+    config.recovery_max_reverse_time =
+      declare_parameter<double>("recovery_max_reverse_time", 3.0);
+    config.recovery_settle_confirmation =
+      declare_parameter<double>("recovery_settle_confirmation", 0.25);
+    config.recovery_cooldown =
+      declare_parameter<double>("recovery_cooldown", 2.0);
+    recovery_reverse_distance_ = config.recovery_reverse_distance;
+    recovery_rear_overhang_ =
+      declare_parameter<double>("recovery_vehicle.rear_overhang", 0.124);
+    recovery_vehicle_width_ =
+      declare_parameter<double>("recovery_vehicle.width", 0.320);
+    recovery_safety_margin_ =
+      declare_parameter<double>("recovery_vehicle.safety_margin", 0.05);
+    recovery_sample_step_ =
+      declare_parameter<double>("recovery_reverse_sample_step", 0.05);
 
     if (race_line_file.empty() || !finite(publish_rate) || publish_rate <= 0.0 ||
       !finite(state_timeout_) || state_timeout_ <= 0.0 ||
       !finite(obstacle_timeout_) || obstacle_timeout_ <= 0.0 ||
       !finite(costmap_timeout_) || costmap_timeout_ <= 0.0 ||
+      !finite(command_timeout_) || command_timeout_ <= 0.0 ||
       occupied_threshold_ < 0 || occupied_threshold_ > 100 ||
-      minimum_confidence_samples_ < 1 || target_frame_.empty())
+      minimum_confidence_samples_ < 1 || target_frame_.empty() || command_topic.empty() ||
+      !finite(recovery_rear_overhang_) || recovery_rear_overhang_ < 0.0 ||
+      !finite(recovery_vehicle_width_) || recovery_vehicle_width_ <= 0.0 ||
+      !finite(recovery_safety_margin_) || recovery_safety_margin_ < 0.0 ||
+      !finite(recovery_sample_step_) || recovery_sample_step_ <= 0.0)
     {
       throw std::invalid_argument("invalid state machine node configuration");
     }
@@ -233,14 +276,21 @@ public:
       [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) {
         latest_costmap_ = std::move(message);
       });
+    command_subscription_ =
+      create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
+      command_topic, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+      [this](ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr message) {
+        latest_command_ = std::move(message);
+        latest_command_received_ = get_clock()->now();
+      });
 
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / publish_rate));
     timer_ = create_wall_timer(period, std::bind(&StateMachineNode::updateAndPublish, this));
     RCLCPP_INFO(
-      get_logger(), "Hierarchical state machine: %s + %s + %s -> %s",
+      get_logger(), "Hierarchical state machine: %s + %s + %s + %s -> %s",
       odom_topic.c_str(), obstacles_topic.c_str(), costmap_topic.c_str(),
-      output_topic.c_str());
+      command_topic.c_str(), output_topic.c_str());
   }
 
 private:
@@ -365,6 +415,28 @@ private:
     return samples > 0 ? static_cast<double>(clear) / samples : 0.0;
   }
 
+  bool reversePathClear(double x, double y, double yaw) const
+  {
+    // base_link is the rear axle center. Sweep a conservative disk from the
+    // rear bumper to the requested reverse endpoint; the front of the vehicle
+    // is intentionally excluded because it may be the contact that recovery
+    // must move away from.
+    const double radius = recovery_vehicle_width_ * 0.5 + recovery_safety_margin_;
+    const double cosine = std::cos(yaw);
+    const double sine = std::sin(yaw);
+    const double end = recovery_rear_overhang_ + recovery_reverse_distance_;
+    for (double distance = recovery_rear_overhang_; distance <= end;
+      distance += recovery_sample_step_)
+    {
+      if (occupiedNear(
+          x - cosine * distance, y - sine * distance, radius))
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
   void updateAndPublish()
   {
     const rclcpp::Time now = get_clock()->now();
@@ -379,7 +451,15 @@ private:
     const bool costmap_valid =
       latest_costmap_ && latest_costmap_->header.frame_id == target_frame_ &&
       fresh(latest_costmap_->header.stamp, costmap_timeout_, now);
+    const double command_age = latest_command_received_.has_value() ?
+      (now - *latest_command_received_).seconds() :
+      std::numeric_limits<double>::infinity();
+    const bool command_valid =
+      latest_command_ && finite(latest_command_->drive.speed) &&
+      finite(command_age) && command_age >= 0.0 && command_age <= command_timeout_;
     observation.inputs_ready = odom_valid && obstacles_valid && costmap_valid;
+    observation.command_available = command_valid;
+    observation.commanded_speed = command_valid ? latest_command_->drive.speed : 0.0;
 
     double marker_x = 0.0;
     double marker_y = 0.0;
@@ -387,8 +467,7 @@ private:
       marker_x = latest_odom_->pose.pose.position.x;
       marker_y = latest_odom_->pose.pose.position.y;
       const double ego_yaw = yawFromQuaternion(latest_odom_->pose.pose.orientation);
-      observation.ego_speed =
-        std::max(0.0, latest_odom_->twist.twist.linear.x);
+      observation.ego_speed = latest_odom_->twist.twist.linear.x;
       const double cosine = std::cos(ego_yaw);
       const double sine = std::sin(ego_yaw);
       double nearest_distance = std::numeric_limits<double>::infinity();
@@ -435,6 +514,8 @@ private:
           corridorScore(nearest, -overtake_lateral_offset_);
         observation.left_available = observation.left_clearance_score >= 0.95;
         observation.right_available = observation.right_clearance_score >= 0.95;
+        observation.reverse_path_clear = reversePathClear(
+          marker_x, marker_y, ego_yaw);
       }
     }
     last_update_time_ = now;
@@ -454,6 +535,7 @@ private:
     output.header.frame_id = target_frame_;
     output.safety_state = static_cast<std::uint8_t>(command.safety_state);
     output.behavior_state = static_cast<std::uint8_t>(command.behavior_state);
+    output.recovery_phase = static_cast<std::uint8_t>(command.recovery_phase);
     output.track_confidence = command.track_confidence;
     output.raceline_weight_scale = command.raceline_weight_scale;
     output.safety_weight_scale = command.safety_weight_scale;
@@ -473,6 +555,8 @@ private:
       output.state = roboracer_msgs::msg::RaceState::TRAILING;
     } else if (command.behavior_state == BehaviorState::OVERTAKE) {
       output.state = roboracer_msgs::msg::RaceState::OVERTAKE;
+    } else if (command.behavior_state == BehaviorState::RECOVERY) {
+      output.state = roboracer_msgs::msg::RaceState::RECOVERY;
     } else {
       output.state = roboracer_msgs::msg::RaceState::GLOBAL_TRACK;
     }
@@ -519,6 +603,8 @@ private:
       " | " + sideName(static_cast<PreferredSide>(state.preferred_side)) +
       " | conf=" + std::to_string(state.track_confidence) +
       " | v=" + std::to_string(state.speed_scale) +
+      " | recovery=" + recoveryPhaseName(
+      static_cast<RecoveryPhase>(state.recovery_phase)) +
       " | " + state.reason;
     marker_publisher_->publish(marker);
   }
@@ -527,6 +613,7 @@ private:
   double state_timeout_{0.10};
   double obstacle_timeout_{0.20};
   double costmap_timeout_{0.12};
+  double command_timeout_{0.20};
   double minimum_obstacle_confidence_{0.25};
   int occupied_threshold_{50};
   double boundary_match_tolerance_{0.30};
@@ -535,6 +622,11 @@ private:
   double corridor_clearance_radius_{0.24};
   double emergency_stop_distance_{0.55};
   double overtake_lateral_offset_{0.45};
+  double recovery_reverse_distance_{0.40};
+  double recovery_rear_overhang_{0.124};
+  double recovery_vehicle_width_{0.320};
+  double recovery_safety_margin_{0.05};
+  double recovery_sample_step_{0.05};
   std::vector<RaceLinePoint> race_line_;
   std::unique_ptr<TrackConfidenceFilter> confidence_filter_;
   std::unique_ptr<RaceStateMachine> state_machine_;
@@ -544,12 +636,16 @@ private:
   nav_msgs::msg::Odometry::ConstSharedPtr latest_odom_;
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr latest_costmap_;
   roboracer_msgs::msg::TrackedObstacleArray::ConstSharedPtr latest_obstacles_;
+  ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr latest_command_;
+  std::optional<rclcpp::Time> latest_command_received_;
   rclcpp::Publisher<roboracer_msgs::msg::RaceState>::SharedPtr state_publisher_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_publisher_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_subscription_;
   rclcpp::Subscription<roboracer_msgs::msg::TrackedObstacleArray>::SharedPtr
     obstacles_subscription_;
+  rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
+    command_subscription_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

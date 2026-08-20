@@ -22,7 +22,15 @@ enum class BehaviorState : std::uint8_t
 {
   RACING = 0,
   TRAILING = 1,
-  OVERTAKE = 2
+  OVERTAKE = 2,
+  RECOVERY = 3
+};
+
+enum class RecoveryPhase : std::uint8_t
+{
+  NONE = 0,
+  REVERSE = 1,
+  SETTLE = 2
 };
 
 enum class PreferredSide : std::int8_t
@@ -53,6 +61,14 @@ struct StateMachineConfig
   double degraded_speed_scale{0.55};
   double minimum_raceline_weight_scale{0.25};
   double maximum_safety_weight_scale{2.0};
+
+  double stuck_command_speed_threshold{0.20};
+  double stuck_speed_threshold{0.05};
+  double stuck_confirmation{1.50};
+  double recovery_reverse_distance{0.40};
+  double recovery_max_reverse_time{3.0};
+  double recovery_settle_confirmation{0.25};
+  double recovery_cooldown{2.0};
 };
 
 struct StateObservation
@@ -70,12 +86,16 @@ struct StateObservation
   double left_clearance_score{0.0};
   double right_clearance_score{0.0};
   double track_confidence{1.0};
+  bool command_available{false};
+  double commanded_speed{0.0};
+  bool reverse_path_clear{false};
 };
 
 struct StateCommand
 {
   SafetyState safety_state{SafetyState::INIT};
   BehaviorState behavior_state{BehaviorState::RACING};
+  RecoveryPhase recovery_phase{RecoveryPhase::NONE};
   PreferredSide preferred_side{PreferredSide::NONE};
   double track_confidence{1.0};
   double speed_scale{0.0};
@@ -122,6 +142,7 @@ private:
     BehaviorState target, PreferredSide side, const std::string & reason,
     double now);
   void clearPendingTransition();
+  void resetRecovery();
   [[nodiscard]] StateCommand command(double now) const;
 
   StateMachineConfig config_;
@@ -135,6 +156,12 @@ private:
   double latest_track_confidence_{1.0};
   double return_blend_start_time_{0.0};
   double return_blend_initial_offset_{0.0};
+  RecoveryPhase recovery_phase_{RecoveryPhase::NONE};
+  double recovery_distance_{0.0};
+  double recovery_start_time_{0.0};
+  std::optional<double> recovery_settle_since_;
+  std::optional<double> stuck_since_;
+  std::optional<double> last_recovery_exit_time_;
   bool initialized_{false};
   std::optional<int> pending_state_;
   std::string pending_reason_;

@@ -3,6 +3,7 @@ state_machine:
     obstacles_topic: /perception/obstacles
     odom_topic: /ego_racecar/odom
     costmap_topic: /perception/local_costmap
+    command_topic: /control/mppi_cmd
     output_topic: /state_machine/state
     marker_topic: /state_machine/state_marker
     race_line_file: ""
@@ -11,6 +12,7 @@ state_machine:
     state_timeout: 0.10
     obstacle_timeout: 0.20
     costmap_timeout: 0.12
+    command_timeout: 0.20
     minimum_obstacle_confidence: 0.25
     occupied_threshold: 50
 
@@ -46,3 +48,20 @@ state_machine:
     degraded_speed_scale: 0.55
     minimum_raceline_weight_scale: 0.25
     maximum_safety_weight_scale: 2.0
+
+    # During RACING/OVERTAKE, sustained stationary odometry arms recovery even
+    # if MPPI is publishing its zero-speed braking fallback. TRAILING still
+    # requires a positive command so a deliberate stop behind an opponent does
+    # not cause reversing. The rear swept corridor must remain clear.
+    stuck_command_speed_threshold: 0.20
+    stuck_speed_threshold: 0.05
+    stuck_confirmation: 1.50
+    recovery_reverse_distance: 0.40
+    recovery_max_reverse_time: 3.0
+    recovery_settle_confirmation: 0.25
+    recovery_cooldown: 2.0
+    recovery_reverse_sample_step: 0.05
+    recovery_vehicle:
+      rear_overhang: 0.124
+      width: 0.320
+      safety_margin: 0.05
