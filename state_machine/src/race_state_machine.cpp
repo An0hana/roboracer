@@ -54,7 +54,27 @@ void validateConfig(const StateMachineConfig & config)
     config.minimum_raceline_weight_scale <= 0.0 ||
     config.minimum_raceline_weight_scale > 1.0 ||
     !finite(config.maximum_safety_weight_scale) ||
-    config.maximum_safety_weight_scale < 1.0)
+    config.maximum_safety_weight_scale < 1.0 ||
+    !finite(config.stuck_speed_threshold) ||
+    config.stuck_speed_threshold < 0.0 ||
+    !finite(config.recovery_entry_time) ||
+    config.recovery_entry_time < 0.0 ||
+    !finite(config.curvature_fraction) ||
+    config.curvature_fraction <= 0.0 || config.curvature_fraction > 1.0 ||
+    !finite(config.max_steering) || config.max_steering <= 0.0 ||
+    !finite(config.wheelbase) || config.wheelbase <= 0.0 ||
+    !finite(config.reverse_speed) || config.reverse_speed < 0.0 ||
+    !std::isfinite(config.reverse_steer_sign) ||
+    !finite(config.reverse_steer_fraction) ||
+    config.reverse_steer_fraction < 0.0 || config.reverse_steer_fraction > 1.0 ||
+    !finite(config.recovery_min_reverse_distance) ||
+    config.recovery_min_reverse_distance < 0.0 ||
+    !finite(config.reverse_max_duration) ||
+    config.reverse_max_duration < 0.0 ||
+    !finite(config.reverse_max_distance) ||
+    config.reverse_max_distance < 0.0 ||
+    !finite(config.exit_clear_time) || config.exit_clear_time < 0.0 ||
+    !finite(config.reentry_debounce) || config.reentry_debounce < 0.0)
   {
     throw std::invalid_argument("invalid race state machine configuration");
   }
@@ -114,6 +134,7 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
   if (initialized_ && observation.time < last_time_) {
     throw std::invalid_argument("state observation time must be monotonic");
   }
+  const double dt = initialized_ ? observation.time - last_time_ : 0.0;
   if (!initialized_) {
     initialized_ = true;
     state_enter_time_ = observation.time;
@@ -125,12 +146,21 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
   if (observation.opponent_detected) {
     last_opponent_seen_time_ = observation.time;
   }
+  required_steering_ = observation.required_steering;
 
   if (safety_state_ == SafetyState::READY && !observation.inputs_ready) {
     transitionSafety(SafetyState::FAULT, "stale_or_missing_input", observation.time);
     return command(observation.time);
   }
+  if (safety_state_ == SafetyState::RECOVERY && !observation.inputs_ready) {
+    transitionSafety(SafetyState::FAULT, "stale_or_missing_input", observation.time);
+    return command(observation.time);
+  }
   if (safety_state_ == SafetyState::READY && observation.emergency_stop) {
+    transitionSafety(SafetyState::STOP, "emergency_clearance", observation.time);
+    return command(observation.time);
+  }
+  if (safety_state_ == SafetyState::RECOVERY && observation.emergency_stop) {
     transitionSafety(SafetyState::STOP, "emergency_clearance", observation.time);
     return command(observation.time);
   }
@@ -161,6 +191,55 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
       }
       break;
     case SafetyState::READY:
+      if (stuckAtCurvatureLimit(observation)) {
+        if (!stuck_since_.has_value()) {
+          stuck_since_ = observation.time;
+        }
+        if (observation.time - *stuck_since_ >= config_.recovery_entry_time) {
+          transitionSafety(
+            SafetyState::RECOVERY, "stuck_curvature_exceeds_limit", observation.time);
+          recovery_enter_time_ = observation.time;
+          reverse_distance_ = 0.0;
+          recovery_clear_since_.reset();
+          recovery_steering_ = config_.reverse_steer_sign *
+            std::copysign(
+              config_.reverse_steer_fraction * config_.max_steering,
+              observation.required_steering);
+        }
+      } else {
+        stuck_since_.reset();
+      }
+      break;
+    case SafetyState::RECOVERY:
+      if (dt > 0.0 && std::isfinite(observation.ego_speed)) {
+        reverse_distance_ += std::abs(observation.ego_speed) * dt;
+      }
+      {
+        const double recovery_duration = observation.time - recovery_enter_time_;
+        const bool force_exit =
+          recovery_duration >= config_.reverse_max_duration ||
+          reverse_distance_ >= config_.reverse_max_distance;
+        const bool clear =
+          !observation.mppi_solver_failed && !observation.aeb_latched;
+        if (clear) {
+          if (!recovery_clear_since_.has_value()) {
+            recovery_clear_since_ = observation.time;
+          }
+          if (!force_exit &&
+            observation.time - *recovery_clear_since_ >= config_.exit_clear_time &&
+            reverse_distance_ >= config_.recovery_min_reverse_distance)
+          {
+            reentry_available_until_ = observation.time + config_.reentry_debounce;
+            transitionSafety(SafetyState::READY, "recovery_complete", observation.time);
+          }
+        } else {
+          recovery_clear_since_.reset();
+        }
+        if (force_exit && safety_state_ == SafetyState::RECOVERY) {
+          reentry_available_until_ = observation.time + config_.reentry_debounce;
+          transitionSafety(SafetyState::READY, "recovery_limit", observation.time);
+        }
+      }
       break;
   }
 
@@ -253,6 +332,16 @@ SafetyState RaceStateMachine::safetyState() const noexcept
 BehaviorState RaceStateMachine::behaviorState() const noexcept
 {
   return behavior_state_;
+}
+
+bool RaceStateMachine::stuckAtCurvatureLimit(
+  const StateObservation & observation) const
+{
+  return std::abs(observation.ego_speed) < config_.stuck_speed_threshold &&
+         (observation.mppi_solver_failed || observation.aeb_latched) &&
+         std::abs(observation.required_steering) >
+           config_.curvature_fraction * config_.max_steering &&
+         observation.time >= reentry_available_until_;
 }
 
 bool RaceStateMachine::opponentAhead(const StateObservation & observation) const
@@ -359,6 +448,11 @@ StateCommand RaceStateMachine::command(double now) const
     (config_.cruise_speed_scale - config_.degraded_speed_scale) *
     latest_track_confidence_;
   output.stop_requested = safety_state_ != SafetyState::READY;
+  output.recovery_active = safety_state_ == SafetyState::RECOVERY;
+  if (output.recovery_active) {
+    output.recovery_speed = config_.reverse_speed;
+    output.recovery_steering = recovery_steering_;
+  }
   if (output.stop_requested) {
     return output;
   }

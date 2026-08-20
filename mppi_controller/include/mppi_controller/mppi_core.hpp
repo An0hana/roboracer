@@ -197,6 +197,10 @@ public:
   [[nodiscard]] std::vector<Waypoint> localReference(
     std::size_t start_index, std::size_t count, std::size_t stride = 1U) const;
   [[nodiscard]] double forwardProgress(double from_s, double to_s) const;
+  // Mean |curvature| over the closed-loop window [center-half, center+half].
+  // half_window == 0 collapses to a single point; an invalid/empty line yields 0.0.
+  [[nodiscard]] double meanAbsCurvature(
+    std::size_t center, std::size_t half_window) const;
 
 private:
   explicit RaceLine(std::vector<Waypoint> waypoints);

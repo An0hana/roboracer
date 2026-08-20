@@ -3,6 +3,7 @@ state_machine:
     obstacles_topic: /perception/obstacles
     odom_topic: /ego_racecar/odom
     costmap_topic: /perception/local_costmap
+    diagnostics_topic: /diagnostics
     output_topic: /state_machine/state
     marker_topic: /state_machine/state_marker
     race_line_file: ""
@@ -46,3 +47,32 @@ state_machine:
     degraded_speed_scale: 0.55
     minimum_raceline_weight_scale: 0.25
     maximum_safety_weight_scale: 2.0
+
+    # Reverse-recovery: /diagnostics (MPPI + safety) is consumed to know when
+    # the planner is failing / AEB is latched. The car is "stuck" when it is
+    # stationary while the raceline demands more steering than max_steering.
+    diagnostics_timeout: 0.5
+    stuck_speed_threshold: 0.05
+    recovery_entry_time: 1.5
+    curvature_fraction: 0.97
+    # Curvature is averaged over a closed-loop window of ± this many raceline
+    # points around the nearest point (~0.1 m spacing => ±5 ≈ ±0.5 m), so the
+    # stuck gate judges the whole turn segment. Keep in sync with MPPI's
+    # creep.curvature_window_points.
+    curvature_window_points: 5
+    max_steering: 0.32
+    wheelbase: 0.324
+
+    # Reverse command (safety layer executes it directly).
+    reverse_speed: 0.6
+    # -1.0 = wheels opposite the curve (per original spec).  Maps where the
+    # narrow side is outside the curve should flip to +1.0.
+    reverse_steer_sign: -1.0
+    reverse_steer_fraction: 0.0
+
+    # Recovery exit gate.
+    recovery_min_reverse_distance: 0.3
+    reverse_max_duration: 6.0
+    reverse_max_distance: 1.8
+    exit_clear_time: 1.0
+    reentry_debounce: 4.0

@@ -52,6 +52,7 @@ struct SafetyConfig
   double state_timeout{0.100};
   double scan_timeout{0.150};
   double command_timeout{0.100};
+  double race_state_timeout{0.150};
   double switch_speed_threshold{0.200};
   double stop_steering_center_speed{0.050};
 
@@ -105,6 +106,13 @@ struct SafetyConfig
   double aeb_steering_recovery_tolerance{0.020};
   double aeb_debounce_duration{0.50};
   double scan_min_valid_fraction{0.50};
+
+  // Reverse-recovery rear safety box in base_link. While recovering the car
+  // moves backward, so the forward swept-path AEB is bypassed in favour of
+  // checking this box: any scan endpoint inside it holds the reverse.
+  double recovery_rear_box_x_min{-2.0};
+  double recovery_rear_box_x_max{0.10};
+  double recovery_rear_box_y{0.28};
 };
 
 struct AebAssessment
@@ -152,6 +160,9 @@ public:
   void updateScan(const ScanData & scan, double now_seconds);
   void updateCommand(
     ControllerMode source, const DriveCommand & command, double now_seconds);
+  void updateRaceState(
+    bool recovery_active, double recovery_speed, double recovery_steering,
+    double now_seconds);
 
   /// Returns false when a live mode change is unsafe. Selecting the current mode is idempotent.
   bool requestMode(ControllerMode requested, double now_seconds);
@@ -185,6 +196,7 @@ private:
   AebAssessment assessAeb(
     double speed, double steering_command, double initial_effective_steering,
     double extra_distance = 0.0) const;
+  bool rearBoxBlocked() const;
   DriveCommand stopCommand(StopReason reason) const;
   TimedCommand & commandFor(ControllerMode mode);
   const TimedCommand & commandFor(ControllerMode mode) const;
@@ -201,6 +213,13 @@ private:
   bool state_received_{false};
   bool state_valid_{false};
   double state_stamp_{0.0};
+  bool race_state_received_{false};
+  bool race_state_valid_{false};
+  double race_state_stamp_{0.0};
+  bool recovery_active_{false};
+  bool was_recovery_active_{false};
+  double recovery_speed_{0.5};
+  double recovery_steering_{0.0};
   double current_speed_{0.0};
   double measured_steering_angle_{0.0};
   double estimated_effective_steering_angle_{0.0};

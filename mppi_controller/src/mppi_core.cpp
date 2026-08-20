@@ -636,6 +636,28 @@ const Waypoint & RaceLine::atWrapped(std::ptrdiff_t index) const
   return waypoints_[static_cast<std::size_t>(index)];
 }
 
+double RaceLine::meanAbsCurvature(
+  std::size_t center, std::size_t half_window) const
+{
+  if (!valid() || half_window == 0U) {
+    if (!valid()) {
+      return 0.0;
+    }
+    return std::abs(atWrapped(static_cast<std::ptrdiff_t>(center)).curvature);
+  }
+  const auto count = static_cast<std::ptrdiff_t>(waypoints_.size());
+  const auto half = std::min<std::ptrdiff_t>(
+    static_cast<std::ptrdiff_t>(half_window), count / 2);
+  const auto center_index = static_cast<std::ptrdiff_t>(center);
+  double sum = 0.0;
+  const std::ptrdiff_t samples = 2 * half + 1;
+  for (std::ptrdiff_t offset = -half; offset <= half; ++offset) {
+    sum += std::abs(
+      atWrapped(center_index + offset).curvature);
+  }
+  return sum / static_cast<double>(samples);
+}
+
 std::size_t RaceLine::nearestIndex(
   double x, double y, std::optional<std::size_t> hint, std::size_t search_radius) const
 {

@@ -12,6 +12,7 @@ find_package(diagnostic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(roboracer_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 add_library(safety_controller_core src/safety_core.cpp)
@@ -33,6 +34,7 @@ ament_target_dependencies(
   nav_msgs
   rcl_interfaces
   rclcpp
+  roboracer_msgs
   sensor_msgs
 )
 

@@ -206,6 +206,139 @@ TEST(TrackConfidenceFilter, FallsFastAndRecoversSlowly)
   EXPECT_GT(recovered, fallen);
 }
 
+StateMachineConfig recoveryConfig()
+{
+  StateMachineConfig value = config();
+  value.recovery_entry_time = 1.5;
+  value.exit_clear_time = 1.0;
+  value.recovery_min_reverse_distance = 0.3;
+  value.reverse_max_duration = 2.0;
+  value.reverse_max_distance = 1.8;
+  value.reentry_debounce = 1.0;
+  return value;
+}
+
+void enterRecovery(RaceStateMachine & machine, StateObservation & observation)
+{
+  observation.ego_speed = 0.0;
+  observation.mppi_solver_failed = true;
+  observation.aeb_latched = false;
+  observation.required_steering = 0.45;
+  const StateCommand result = runFor(machine, observation, 1.6);
+  ASSERT_EQ(result.safety_state, SafetyState::RECOVERY);
+}
+
+TEST(RaceStateMachine, EntersRecoveryWhenStuckAtCurvatureLimit)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+
+  // Stationary + planner failing, but the raceline is within capability.
+  observation.ego_speed = 0.0;
+  observation.mppi_solver_failed = true;
+  observation.required_steering = 0.10;
+  const auto safe = runFor(machine, observation, 1.6);
+  EXPECT_EQ(safe.safety_state, SafetyState::READY);
+
+  // Stationary + infeasible curvature, but the planner is healthy.
+  observation.mppi_solver_failed = false;
+  observation.required_steering = 0.45;
+  const auto healthy = runFor(machine, observation, 1.6);
+  EXPECT_EQ(healthy.safety_state, SafetyState::READY);
+
+  // Stationary + planner failing + curvature beyond the mechanical limit.
+  observation.mppi_solver_failed = true;
+  const auto result = runFor(machine, observation, 1.6);
+  EXPECT_EQ(result.safety_state, SafetyState::RECOVERY);
+  EXPECT_TRUE(result.recovery_active);
+  EXPECT_TRUE(result.stop_requested);
+  EXPECT_DOUBLE_EQ(result.recovery_speed, 0.5);
+  // required_steering > 0 with reverse_steer_sign = -1.0 -> reverse hard left.
+  EXPECT_DOUBLE_EQ(result.recovery_steering, -0.32);
+}
+
+TEST(RaceStateMachine, ExitsRecoveryAfterReverseWhenPlannerClears)
+{
+  RaceStateMachine machine(recoveryConfig());
+  StateObservation observation;
+  enterReady(machine, observation);
+  enterRecovery(machine, observation);
+
+  // Reverse 0.8 s at 0.5 m/s -> reverse_distance = 0.4 >= 0.3 minimum.
+  observation.ego_speed = -0.5;
+  static_cast<void>(runFor(machine, observation, 0.8));
+  EXPECT_EQ(machine.update(observation).safety_state, SafetyState::RECOVERY);
+
+  // Planner recovers; after the clear window and minimum reverse distance the
+  // machine must return to READY and drop the reverse command.
+  observation.mppi_solver_failed = false;
+  const auto result = runFor(machine, observation, 1.2);
+  EXPECT_EQ(result.safety_state, SafetyState::READY);
+  EXPECT_FALSE(result.recovery_active);
+  EXPECT_EQ(result.reason, "recovery_complete");
+}
+
+TEST(RaceStateMachine, RecoveryForcedExitOnMaxDuration)
+{
+  StateMachineConfig cfg = recoveryConfig();
+  cfg.recovery_min_reverse_distance = 0.3;
+  RaceStateMachine machine(cfg);
+  StateObservation observation;
+  enterReady(machine, observation);
+  enterRecovery(machine, observation);
+
+  // Planner keeps failing and the car cannot move (e.g. rear blocked): the
+  // clear window never opens and reverse_distance stays below the minimum, so
+  // the maximum-duration backstop must force the exit.
+  observation.ego_speed = 0.0;
+  observation.mppi_solver_failed = true;
+  const auto result = runFor(machine, observation, 2.2);
+  EXPECT_EQ(result.safety_state, SafetyState::READY);
+  EXPECT_EQ(result.reason, "recovery_limit");
+}
+
+TEST(RaceStateMachine, RecoveryFaultsOnStaleInput)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+  enterRecovery(machine, observation);
+
+  observation.inputs_ready = false;
+  const auto result = machine.update(observation);
+  EXPECT_EQ(result.safety_state, SafetyState::FAULT);
+  EXPECT_TRUE(result.stop_requested);
+  EXPECT_FALSE(result.recovery_active);
+}
+
+TEST(RaceStateMachine, RecoveryReentryIsDebounced)
+{
+  StateMachineConfig cfg = recoveryConfig();  // reentry_debounce = 1.0
+  RaceStateMachine machine(cfg);
+  StateObservation observation;
+  enterReady(machine, observation);
+  enterRecovery(machine, observation);
+
+  // Reverse a little, let the planner clear, exit to READY.
+  observation.ego_speed = -0.5;
+  static_cast<void>(runFor(machine, observation, 0.8));
+  observation.mppi_solver_failed = false;
+  const auto exited = runFor(machine, observation, 1.2);
+  ASSERT_EQ(exited.safety_state, SafetyState::READY);
+
+  // Immediately stuck again: reentry is gated by reentry_debounce (1.0 s).
+  observation.ego_speed = 0.0;
+  observation.mppi_solver_failed = true;
+  observation.required_steering = 0.45;
+  const auto debounced = runFor(machine, observation, 1.5);
+  EXPECT_EQ(debounced.safety_state, SafetyState::READY);
+
+  // Once the debounce elapses the stuck accumulator runs again and re-enters.
+  const auto reentered = runFor(machine, observation, 1.5);
+  EXPECT_EQ(reentered.safety_state, SafetyState::RECOVERY);
+}
+
 TEST(RaceStateMachine, RejectsInvalidInputAndConfiguration)
 {
   auto invalid = config();

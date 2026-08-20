@@ -16,6 +16,7 @@
 #include "safety_controller/safety_core.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "roboracer_msgs/msg/race_state.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 
 namespace safety_controller
@@ -62,6 +63,8 @@ public:
       "output_topic", "/ackermann_cmd");
     const std::string diagnostics_topic = declare_parameter<std::string>(
       "diagnostics_topic", "/diagnostics");
+    const std::string race_state_topic = declare_parameter<std::string>(
+      "race_state_topic", "/state_machine/state");
     output_frame_ = declare_parameter<std::string>("output_frame", "base_link");
 
     const std::string initial_mode_text = declare_parameter<std::string>(
@@ -75,6 +78,8 @@ public:
     config.state_timeout = declare_parameter<double>("state_timeout", 0.100);
     config.scan_timeout = declare_parameter<double>("scan_timeout", 0.150);
     config.command_timeout = declare_parameter<double>("command_timeout", 0.100);
+    config.race_state_timeout =
+      declare_parameter<double>("race_state_timeout", 0.150);
     config.switch_speed_threshold = declare_parameter<double>(
       "switch_speed_threshold", 0.200);
     config.stop_steering_center_speed = declare_parameter<double>(
@@ -138,6 +143,12 @@ public:
       "aeb_steering_recovery_tolerance", 0.020);
     config.scan_min_valid_fraction = declare_parameter<double>(
       "scan_min_valid_fraction", 0.50);
+    config.recovery_rear_box_x_min =
+      declare_parameter<double>("recovery_rear_box_x_min", -2.0);
+    config.recovery_rear_box_x_max =
+      declare_parameter<double>("recovery_rear_box_x_max", 0.10);
+    config.recovery_rear_box_y =
+      declare_parameter<double>("recovery_rear_box_y", 0.28);
     wheelbase_ = config.wheelbase;
     steering_estimation_min_speed_ = declare_parameter<double>(
       "steering_estimation_min_speed", 0.500);
@@ -174,6 +185,10 @@ public:
       [this](ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr message) {
         commandCallback(ControllerMode::kFtg, *message);
       });
+    race_state_subscription_ =
+      create_subscription<roboracer_msgs::msg::RaceState>(
+      race_state_topic, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+      std::bind(&SafetyControllerNode::raceStateCallback, this, std::placeholders::_1));
 
     parameter_callback_handle_ = add_on_set_parameters_callback(
       std::bind(&SafetyControllerNode::parametersCallback, this, std::placeholders::_1));
@@ -243,6 +258,16 @@ private:
       static_cast<double>(message.drive.steering_angle)};
     std::lock_guard<std::mutex> lock(core_mutex_);
     core_->updateCommand(source, command, sourceTimeOrNow(message.header.stamp));
+  }
+
+  void raceStateCallback(const roboracer_msgs::msg::RaceState::ConstSharedPtr message)
+  {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    core_->updateRaceState(
+      message->recovery_active,
+      static_cast<double>(message->recovery_speed),
+      static_cast<double>(message->recovery_steering),
+      sourceTimeOrNow(message->header.stamp));
   }
 
   rcl_interfaces::msg::SetParametersResult parametersCallback(
@@ -374,6 +399,7 @@ private:
   rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
     mppi_subscription_;
   rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr ftg_subscription_;
+  rclcpp::Subscription<roboracer_msgs::msg::RaceState>::SharedPtr race_state_subscription_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 };

@@ -69,7 +69,7 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
 : config_(config), selected_mode_(initial_mode)
 {
   if (!finitePositive(config_.state_timeout) || !finitePositive(config_.scan_timeout) ||
-    !finitePositive(config_.command_timeout) ||
+    !finitePositive(config_.command_timeout) || !finitePositive(config_.race_state_timeout) ||
     !finiteNonnegative(config_.switch_speed_threshold) ||
     !finiteNonnegative(config_.stop_steering_center_speed) ||
     !std::isfinite(config_.min_command_speed) ||
@@ -117,7 +117,12 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !finitePositive(config_.aeb_steering_recovery_rate) ||
     !finiteNonnegative(config_.aeb_steering_recovery_tolerance) ||
     !std::isfinite(config_.scan_min_valid_fraction) ||
-    config_.scan_min_valid_fraction < 0.0 || config_.scan_min_valid_fraction > 1.0)
+    config_.scan_min_valid_fraction < 0.0 || config_.scan_min_valid_fraction > 1.0 ||
+    !std::isfinite(config_.recovery_rear_box_x_min) ||
+    !std::isfinite(config_.recovery_rear_box_x_max) ||
+    config_.recovery_rear_box_x_min >= config_.recovery_rear_box_x_max ||
+    !std::isfinite(config_.recovery_rear_box_y) ||
+    config_.recovery_rear_box_y <= 0.0)
   {
     throw std::invalid_argument("invalid SafetyConfig");
   }
@@ -161,6 +166,19 @@ void SafetyCore::updateCommand(
   target.received = true;
 }
 
+void SafetyCore::updateRaceState(
+  bool recovery_active, double recovery_speed, double recovery_steering,
+  double now_seconds)
+{
+  race_state_received_ = true;
+  race_state_stamp_ = now_seconds;
+  race_state_valid_ = std::isfinite(now_seconds) &&
+    std::isfinite(recovery_speed) && std::isfinite(recovery_steering);
+  recovery_active_ = race_state_valid_ && recovery_active;
+  recovery_speed_ = std::abs(recovery_speed);
+  recovery_steering_ = recovery_steering;
+}
+
 bool SafetyCore::requestMode(ControllerMode requested, double now_seconds)
 {
   if (requested == selected_mode_) {
@@ -194,6 +212,43 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
   estimated_effective_steering_angle_ = advanceEffectiveSteering(
     estimated_effective_steering_angle_, output_steering_angle_,
     current_speed_, elapsed);
+
+  const double race_state_age =
+    age(now_seconds, race_state_stamp_, race_state_received_);
+  const bool race_state_fresh = race_state_received_ && race_state_valid_ &&
+    race_state_age <= config_.race_state_timeout;
+  if (recovery_active_ && race_state_fresh && state_valid_ && scan_valid_ &&
+    result.state_age <= config_.state_timeout &&
+    result.scan_age <= config_.scan_timeout && std::isfinite(now_seconds))
+  {
+    if (!was_recovery_active_) {
+      // Entering recovery: drop the forward AEB latch so the state machine's
+      // "AEB no longer latched" exit gate cannot deadlock on a frozen latch.
+      aeb_latched_ = false;
+      aeb_emergency_since_.reset();
+      aeb_clear_since_.reset();
+      aeb_latch_start_.reset();
+      aeb_resume_active_ = false;
+      aeb_resume_speed_limit_ = std::numeric_limits<double>::infinity();
+      aeb_recovery_steering_angle_ = 0.0;
+      was_recovery_active_ = true;
+    }
+    const double steering = std::clamp(
+      recovery_steering_, config_.min_command_steering, config_.max_command_steering);
+    result.command = DriveCommand{
+      rearBoxBlocked() ? 0.0 : -std::abs(recovery_speed_), steering};
+    result.aeb.scan_valid = scan_valid_;
+    result.aeb.emergency = false;
+    result.aeb_latched = false;
+    result.aeb_resume_active = false;
+    result.stop_reason = StopReason::kNone;
+    result.estimated_effective_steering = estimated_effective_steering_angle_;
+    output_steering_angle_ = result.command.steering_angle;
+    last_evaluation_time_ = now_seconds;
+    return result;
+  }
+  was_recovery_active_ = false;
+
   const double aeb_steering_target =
     selected_command.received && selected_command.command.valid() ?
     std::clamp(
@@ -606,6 +661,42 @@ AebAssessment SafetyCore::assessAeb(
     }
   }
   return assessment;
+}
+
+bool SafetyCore::rearBoxBlocked() const
+{
+  if (!scan_valid_ || scan_.ranges.empty()) {
+    return true;  // Fail closed: never reverse without a valid scan.
+  }
+  for (std::size_t beam = 0U; beam < scan_.ranges.size(); ++beam) {
+    const double measured_range = scan_.ranges[beam];
+    if (!std::isfinite(measured_range) || measured_range > scan_.range_max ||
+      measured_range < scan_.range_min)
+    {
+      continue;
+    }
+    const double angle = scan_.angle_min +
+      static_cast<double>(beam) * scan_.angle_increment;
+    const double point_x =
+      config_.lidar_offset_x + measured_range * std::cos(angle);
+    const double point_y =
+      config_.lidar_offset_y + measured_range * std::sin(angle);
+    if (config_.self_filter_enabled &&
+      point_x >= config_.self_filter_min_x &&
+      point_x <= config_.self_filter_max_x &&
+      point_y >= config_.self_filter_min_y &&
+      point_y <= config_.self_filter_max_y)
+    {
+      continue;
+    }
+    if (point_x >= config_.recovery_rear_box_x_min &&
+      point_x <= config_.recovery_rear_box_x_max &&
+      std::abs(point_y) <= config_.recovery_rear_box_y)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 DriveCommand SafetyCore::stopCommand(StopReason reason) const

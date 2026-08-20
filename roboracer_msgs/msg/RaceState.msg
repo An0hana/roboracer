@@ -6,11 +6,13 @@ uint8 OVERTAKE=4
 uint8 FAULT=5
 uint8 STOP=6
 uint8 RETURN=7
+uint8 RECOVERING=8
 
 uint8 SAFETY_INIT=0
 uint8 SAFETY_READY=1
 uint8 SAFETY_FAULT=2
 uint8 SAFETY_STOP=3
+uint8 SAFETY_RECOVERY=4
 
 uint8 BEHAVIOR_RACING=0
 uint8 BEHAVIOR_TRAILING=1
@@ -39,5 +41,13 @@ int8 preferred_side
 float64 speed_scale
 bool use_local_trajectory
 bool fallback_ftg
+
+# Reverse-recovery mode: the state machine decides when the car is stuck at a
+# curvature that exceeds the mechanical steering limit and requests low-speed
+# reverse.  recovery_steering is already full-signed (reverse direction);
+# recovery_speed is the positive magnitude the safety layer reverses at.
+bool recovery_active
+float64 recovery_speed
+float64 recovery_steering
 
 string reason
