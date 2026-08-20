@@ -116,6 +116,7 @@ SafetyCore::SafetyCore(const SafetyConfig & config, ControllerMode initial_mode)
     !finiteNonnegative(config_.aeb_steering_recovery_max_speed) ||
     !finitePositive(config_.aeb_steering_recovery_rate) ||
     !finiteNonnegative(config_.aeb_steering_recovery_tolerance) ||
+    !finiteNonnegative(config_.aeb_soft_speed_limit) ||
     !std::isfinite(config_.scan_min_valid_fraction) ||
     config_.scan_min_valid_fraction < 0.0 || config_.scan_min_valid_fraction > 1.0 ||
     !std::isfinite(config_.recovery_rear_box_x_min) ||
@@ -425,12 +426,6 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
 
   if (result.stopped()) {
     result.command = stopCommand(result.stop_reason);
-    if (result.stop_reason == StopReason::kAeb &&
-      selected_command.received && selected_command.command.valid()) {
-      result.command.steering_angle = std::clamp(
-        selected_command.command.steering_angle,
-        config_.min_command_steering, config_.max_command_steering);
-    }
     output_steering_angle_ = result.command.steering_angle;
   } else {
     result.command = selected_command.command;
@@ -439,8 +434,9 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     result.command.steering_angle = std::clamp(
       result.command.steering_angle,
       config_.min_command_steering, config_.max_command_steering);
-    if (aeb_soft) {
-      result.command.speed = 0.8;
+    if (aeb_soft && result.command.speed > 0.0) {
+      result.command.speed = std::min(
+        result.command.speed, config_.aeb_soft_speed_limit);
     }
     if (aeb_resume_active_) {
       aeb_resume_speed_limit_ = std::min(

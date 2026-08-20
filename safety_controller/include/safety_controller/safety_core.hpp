@@ -105,6 +105,9 @@ struct SafetyConfig
   double aeb_steering_recovery_rate{0.800};
   double aeb_steering_recovery_tolerance{0.020};
   double aeb_debounce_duration{0.50};
+  // During the debounce window AEB may reduce a positive forward command,
+  // but it must never raise a slower/zero command issued by the planner.
+  double aeb_soft_speed_limit{0.80};
   double scan_min_valid_fraction{0.50};
 
   // Reverse-recovery rear safety box in base_link. While recovering the car

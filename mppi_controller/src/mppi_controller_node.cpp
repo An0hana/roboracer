@@ -193,11 +193,13 @@ private:
     declare_parameter<double>("vehicle.min_speed", 0.0);
     declare_parameter<double>("vehicle.max_speed", 2.0);
 
-    // Solver-failure creep: gate the forward slide on the raceline curvature
-    // averaged over a window of waypoints.  Turns that need more steering than
-    // max_steering are physically impassable, so stop instead of creeping.
+    // Solver-failure creep remains available, but tight turns use a much lower
+    // speed. The state machine observes actual progress and decides whether a
+    // stopped vehicle needs reverse recovery.
     declare_parameter<int>("creep.curvature_window_points", 5);
-    declare_parameter<double>("creep.curvature_fraction", 1.0);
+    declare_parameter<double>("creep.tight_curve_steering_threshold", 0.18);
+    declare_parameter<double>("creep.normal_speed", 1.0);
+    declare_parameter<double>("creep.tight_curve_speed", 0.25);
 
     declare_parameter<double>("weights.lateral", 12.0);
     declare_parameter<double>("weights.heading", 8.0);
@@ -278,16 +280,21 @@ private:
       vehicle_.max_speed = parameter<double>("vehicle.max_speed");
       creep_curvature_window_points_ =
         parameter<int>("creep.curvature_window_points");
-      const double creep_curvature_fraction =
-        parameter<double>("creep.curvature_fraction");
+      creep_tight_curve_steering_threshold_ =
+        parameter<double>("creep.tight_curve_steering_threshold");
+      creep_normal_speed_ = parameter<double>("creep.normal_speed");
+      creep_tight_curve_speed_ = parameter<double>("creep.tight_curve_speed");
       if (creep_curvature_window_points_ < 0 ||
-        !std::isfinite(creep_curvature_fraction) ||
-        creep_curvature_fraction <= 0.0)
+        !std::isfinite(creep_tight_curve_steering_threshold_) ||
+        creep_tight_curve_steering_threshold_ <= 0.0 ||
+        !std::isfinite(creep_normal_speed_) || creep_normal_speed_ <= 0.0 ||
+        creep_normal_speed_ > vehicle_.max_speed ||
+        !std::isfinite(creep_tight_curve_speed_) || creep_tight_curve_speed_ <= 0.0 ||
+        creep_tight_curve_speed_ > creep_normal_speed_)
       {
         error = "invalid creep curvature gate configuration";
         return false;
       }
-      creep_curvature_limit_ = creep_curvature_fraction * vehicle_.max_steering;
       vehicle_.max_lateral_acceleration =
         parameter<double>("mppi.max_lateral_acceleration");
       model_ = std::make_unique<BicycleModel>(vehicle_);
@@ -1088,7 +1095,6 @@ private:
       const double failure_duration =
         (tick_time - *last_solver_failure_time_).seconds();
 
-      constexpr double kRecoveryMaxSpeed = 1.5;
       constexpr double kAebResetDuration = 0.5;
       if (failure_duration > kAebResetDuration &&
           request.initial_state.speed < 0.10) {
@@ -1098,26 +1104,22 @@ private:
       {
         State recovery_state = request.initial_state;
         double recovery_steering_rate = 0.0;
+        double recovery_speed = creep_normal_speed_;
         if (race_line_.has_value() && race_line_->valid()) {
           const TrackProjection proj = race_line_->project(
             recovery_state, std::nullopt, mppi_.nearest_search_radius);
           const Waypoint & ref = race_line_->atWrapped(
             static_cast<std::ptrdiff_t>(proj.index));
 
-          // Curvature gate: sliding forward at full lock is only useful while
-          // the raceline turn stays within the mechanical steering limit.  If
-          // the average curvature over the nearby window demands more, creeping
-          // is futile — stop so reverse-recovery can take over.
-          const double mean_abs_curv = race_line_->meanAbsCurvature(
+          // A single solver miss in a tight turn must not create a hard stop.
+          // Keep the fallback monotonic and slow; if AEB/static friction stops
+          // actual progress, the state machine will confirm and own reversing.
+          const double mean_curvature = race_line_->meanCurvature(
             proj.index, static_cast<std::size_t>(creep_curvature_window_points_));
-          if (std::atan(vehicle_.wheelbase * mean_abs_curv) >
-            creep_curvature_limit_)
-          {
-            publishStop(
-              "curvature_infeasible",
-              diagnostic_msgs::msg::DiagnosticStatus::WARN, state_age);
-            return;
-          }
+          recovery_speed = solverFailureCreepSpeed(
+            mean_curvature, vehicle_.wheelbase,
+            creep_tight_curve_steering_threshold_, creep_normal_speed_,
+            creep_tight_curve_speed_);
 
           const double lat_err = proj.lateral_error;
           const double desired_heading = normalizeAngle(
@@ -1145,7 +1147,7 @@ private:
         } else {
           recovery_state.steering_command = last_commanded_steering_;
         }
-        recovery_state.speed = kRecoveryMaxSpeed;
+        recovery_state.speed = recovery_speed;
         const double mppi_accel = std::isfinite(result.control.acceleration) ?
           result.control.acceleration : 0.0;
         Control recovery_control{recovery_steering_rate, mppi_accel};
@@ -1524,7 +1526,9 @@ private:
   std::optional<RaceLine> race_line_;
   // Creep curvature gate (solver-failure recovery path).
   int creep_curvature_window_points_{5};
-  double creep_curvature_limit_{0.32};
+  double creep_tight_curve_steering_threshold_{0.18};
+  double creep_normal_speed_{1.0};
+  double creep_tight_curve_speed_{0.25};
   std::unique_ptr<MppiBackend> backend_;
   std::unique_ptr<BicycleModel> model_;
   std::string race_line_file_;

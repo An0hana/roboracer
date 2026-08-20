@@ -110,17 +110,16 @@ const char * safetyName(SafetyState state)
 
 bool isMppiFailure(const std::string & message)
 {
-  // CUDA backend / solver failures, the stationary warm-start stall, and the
-  // creep curvature gate ("curvature_infeasible": the turn needs more steering
-  // than max_steering, so MPPI stopped instead of sliding) are the planner-side
-  // evidence of being stuck.  "state_machine_stop:*" and "solver_failure_recovery"
-  // (creep is an active attempt to slide through, not a stall) are excluded.
+  // Treat both legacy failure messages and active solver-failure creep as
+  // planner-side evidence. The state machine separately requires low measured
+  // progress, so a moving creep command cannot trigger reverse recovery.
   if (message.rfind("cuda_", 0U) == 0U) {
     return true;
   }
   return message == "solver_exception" || message == "solve_timeout" ||
          message == "stuck_warm_start_recovery" ||
-         message == "curvature_infeasible";
+         message == "curvature_infeasible" ||
+         message == "solver_failure_recovery";
 }
 
 const char * behaviorName(BehaviorState state)
@@ -224,26 +223,40 @@ public:
     config.maximum_safety_weight_scale =
       declare_parameter<double>("maximum_safety_weight_scale", 2.0);
     config.stuck_speed_threshold =
-      declare_parameter<double>("stuck_speed_threshold", 0.05);
+      declare_parameter<double>("stuck_speed_threshold", 0.08);
     config.recovery_entry_time =
-      declare_parameter<double>("recovery_entry_time", 1.5);
-    config.curvature_fraction =
-      declare_parameter<double>("curvature_fraction", 0.85);
-    config.max_steering = declare_parameter<double>("max_steering", 0.32);
+      declare_parameter<double>("recovery_entry_time", 0.75);
+    config.failure_evidence_hold_time =
+      declare_parameter<double>("failure_evidence_hold_time", 1.0);
+    config.tight_curve_steering_threshold =
+      declare_parameter<double>("tight_curve_steering_threshold", 0.18);
+    config.tight_curve_exit_threshold =
+      declare_parameter<double>("tight_curve_exit_threshold", 0.14);
+    config.steering_saturation_fraction =
+      declare_parameter<double>("steering_saturation_fraction", 0.85);
+    config.min_steering = declare_parameter<double>("min_steering", -0.404);
+    config.max_steering = declare_parameter<double>("max_steering", 0.381);
     config.wheelbase = declare_parameter<double>("wheelbase", 0.324);
     wheelbase_ = config.wheelbase;
-    config.reverse_speed = declare_parameter<double>("reverse_speed", 0.5);
+    config.recovery_settle_time =
+      declare_parameter<double>("recovery_settle_time", 0.30);
+    config.reverse_speed = declare_parameter<double>("reverse_speed", 0.30);
     config.reverse_steer_sign =
       declare_parameter<double>("reverse_steer_sign", -1.0);
     config.reverse_steer_fraction =
-      declare_parameter<double>("reverse_steer_fraction", 1.0);
+      declare_parameter<double>("reverse_steer_fraction", 0.90);
     config.recovery_min_reverse_distance =
       declare_parameter<double>("recovery_min_reverse_distance", 0.3);
+    config.recovery_target_reverse_distance =
+      declare_parameter<double>("recovery_target_reverse_distance", 0.6);
     config.reverse_max_duration =
       declare_parameter<double>("reverse_max_duration", 6.0);
     config.reverse_max_distance =
       declare_parameter<double>("reverse_max_distance", 1.8);
-    config.exit_clear_time = declare_parameter<double>("exit_clear_time", 1.0);
+    config.recovery_stop_speed_threshold =
+      declare_parameter<double>("recovery_stop_speed_threshold", 0.05);
+    config.recovery_stop_hold_time =
+      declare_parameter<double>("recovery_stop_hold_time", 0.30);
     config.reentry_debounce = declare_parameter<double>("reentry_debounce", 4.0);
     // Window (in raceline points) for averaging curvature when judging whether
     // the car is stuck at a turn too sharp for the mechanical steering limit.
@@ -313,6 +326,9 @@ private:
     bool saw_mppi = false;
     bool saw_safety = false;
     bool mppi_fail = false;
+    bool saw_mppi_steering = false;
+    double mppi_steering_command = mppi_steering_command_;
+    bool aeb_emergency = false;
     bool aeb_latched = false;
     for (const auto & status : message->status) {
       const std::string & name = status.name;
@@ -321,10 +337,26 @@ private:
       {
         saw_mppi = true;
         mppi_fail = isMppiFailure(status.message);
+        for (const auto & item : status.values) {
+          if (item.key == "steering_command_target_rad") {
+            try {
+              const double parsed = std::stod(item.value);
+              if (finite(parsed)) {
+                mppi_steering_command = parsed;
+                saw_mppi_steering = true;
+              }
+            } catch (const std::exception &) {
+              // Ignore malformed third-party diagnostic values. Freshness of
+              // the last valid steering value is tied to the MPPI status.
+            }
+          }
+        }
       } else if (name == "safety_controller/arbiter") {
         saw_safety = true;
         for (const auto & item : status.values) {
-          if (item.key == "aeb_latched") {
+          if (item.key == "aeb_emergency") {
+            aeb_emergency = item.value == "true";
+          } else if (item.key == "aeb_latched") {
             aeb_latched = item.value == "true";
           }
         }
@@ -333,9 +365,13 @@ private:
     if (saw_mppi) {
       mppi_diag_time_ = now;
       mppi_solver_failed_ = mppi_fail;
+      if (saw_mppi_steering) {
+        mppi_steering_command_ = mppi_steering_command;
+      }
     }
     if (saw_safety) {
       safety_diag_time_ = now;
+      aeb_emergency_ = aeb_emergency;
       aeb_latched_ = aeb_latched;
     }
   }
@@ -356,11 +392,12 @@ private:
     return best;
   }
 
-  // Mean |curvature| over the closed-loop window [center-half, center+half].
+  // Signed mean curvature over the closed-loop window. Opposite bends cancel
+  // instead of being misclassified as one impossible turn at an S transition.
   // Half-width is capped at the track midpoint so a large window never
   // over-samples a short line.  Mirrors MPPI's creep gate (same default window)
   // so the stuck gate and the creep gate judge the same turn segment.
-  double meanAbsCurvature(std::size_t center, std::size_t half_window) const
+  double meanCurvature(std::size_t center, std::size_t half_window) const
   {
     const std::size_t size = race_line_.size();
     if (size == 0U) {
@@ -370,10 +407,10 @@ private:
     double sum = 0.0;
     const std::size_t samples = 2U * half + 1U;
     for (std::size_t offset = size - half; offset < size; ++offset) {
-      sum += std::abs(race_line_[(center + offset) % size].curvature);
+      sum += race_line_[(center + offset) % size].curvature;
     }
     for (std::size_t offset = 0U; offset <= half; ++offset) {
-      sum += std::abs(race_line_[(center + offset) % size].curvature);
+      sum += race_line_[(center + offset) % size].curvature;
     }
     return sum / static_cast<double>(samples);
   }
@@ -500,6 +537,13 @@ private:
     observation.aeb_latched =
       safety_diag_time_ >= 0.0 &&
       now_seconds - safety_diag_time_ <= diagnostics_timeout_ && aeb_latched_;
+    observation.aeb_emergency =
+      safety_diag_time_ >= 0.0 &&
+      now_seconds - safety_diag_time_ <= diagnostics_timeout_ && aeb_emergency_;
+    observation.mppi_steering_command =
+      mppi_diag_time_ >= 0.0 &&
+      now_seconds - mppi_diag_time_ <= diagnostics_timeout_ ?
+      mppi_steering_command_ : 0.0;
 
     double marker_x = 0.0;
     double marker_y = 0.0;
@@ -510,14 +554,11 @@ private:
       // Signed speed: negative while reversing. The recovery gate uses |v|.
       observation.ego_speed = latest_odom_->twist.twist.linear.x;
       const std::size_t nearest = nearestRaceLine(marker_x, marker_y);
-      // Curvature of a nearby window, not a single point: the stuck gate must
-      // judge the whole turn segment the car faces, not a locally-flat sample.
-      // Sign from the nearest point so reverse steering points away from the bend.
-      const double mean_abs_curv = meanAbsCurvature(
+      // Signed window curvature rejects alternating S-bends and directly
+      // provides the turn direction for reverse steering.
+      const double mean_curvature = meanCurvature(
         nearest, curvature_window_points_);
-      observation.required_steering = std::copysign(
-        std::atan(mean_abs_curv * wheelbase_),
-        race_line_[nearest].curvature);
+      observation.required_steering = std::atan(mean_curvature * wheelbase_);
       const double cosine = std::cos(ego_yaw);
       const double sine = std::sin(ego_yaw);
       double nearest_distance = std::numeric_limits<double>::infinity();
@@ -661,7 +702,9 @@ private:
   int curvature_window_points_{5};
   double diagnostics_timeout_{0.5};
   bool mppi_solver_failed_{false};
+  bool aeb_emergency_{false};
   bool aeb_latched_{false};
+  double mppi_steering_command_{0.0};
   double mppi_diag_time_{-1.0e9};
   double safety_diag_time_{-1.0e9};
   double state_timeout_{0.10};

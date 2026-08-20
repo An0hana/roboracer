@@ -133,6 +133,8 @@ public:
       "aeb_max_latch_duration", 5.0);
     config.aeb_debounce_duration = declare_parameter<double>(
       "aeb_debounce_duration", 0.50);
+    config.aeb_soft_speed_limit = declare_parameter<double>(
+      "aeb_soft_speed_limit", 0.80);
     config.aeb_steering_recovery_enabled = declare_parameter<bool>(
       "aeb_steering_recovery_enabled", true);
     config.aeb_steering_recovery_max_speed = declare_parameter<double>(

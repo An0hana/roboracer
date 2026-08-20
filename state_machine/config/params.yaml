@@ -48,31 +48,37 @@ state_machine:
     minimum_raceline_weight_scale: 0.25
     maximum_safety_weight_scale: 2.0
 
-    # Reverse-recovery: /diagnostics (MPPI + safety) is consumed to know when
-    # the planner is failing / AEB is latched. The car is "stuck" when it is
-    # stationary while the raceline demands more steering than max_steering.
+    # Reverse recovery combines fresh planner/AEB failure evidence with low
+    # measured progress and either a tight raceline turn or saturated steering.
     diagnostics_timeout: 0.5
-    stuck_speed_threshold: 0.05
-    recovery_entry_time: 1.5
-    curvature_fraction: 0.97
-    # Curvature is averaged over a closed-loop window of ± this many raceline
-    # points around the nearest point (~0.1 m spacing => ±5 ≈ ±0.5 m), so the
-    # stuck gate judges the whole turn segment. Keep in sync with MPPI's
-    # creep.curvature_window_points.
+    stuck_speed_threshold: 0.08
+    recovery_entry_time: 0.75
+    failure_evidence_hold_time: 1.0
+    # The default raceline peaks near 0.215 rad equivalent steering. These
+    # thresholds identify its genuinely tight sections without pretending the
+    # centerline itself exceeds the mechanical steering stop.
+    tight_curve_steering_threshold: 0.18
+    tight_curve_exit_threshold: 0.14
+    steering_saturation_fraction: 0.85
+    # Signed steering envelope, shared by launch with MPPI and safety.
+    min_steering: -0.404
+    max_steering: 0.381
+    # Signed curvature is averaged over ± this many ~0.1 m raceline points.
     curvature_window_points: 5
-    max_steering: 0.32
     wheelbase: 0.324
 
-    # Reverse command (safety layer executes it directly).
-    reverse_speed: 0.6
-    # -1.0 = wheels opposite the curve (per original spec).  Maps where the
-    # narrow side is outside the curve should flip to +1.0.
+    # Phased maneuver: settle steering at zero speed, reverse slowly with the
+    # wheels opposite the bend, then command zero until odometry confirms stop.
+    recovery_settle_time: 0.30
+    reverse_speed: 0.30
     reverse_steer_sign: -1.0
-    reverse_steer_fraction: 0.0
+    reverse_steer_fraction: 0.90
 
-    # Recovery exit gate.
+    # Reverse exit gate. Forward motion never contributes to these distances.
     recovery_min_reverse_distance: 0.3
+    recovery_target_reverse_distance: 0.6
     reverse_max_duration: 6.0
     reverse_max_distance: 1.8
-    exit_clear_time: 1.0
+    recovery_stop_speed_threshold: 0.05
+    recovery_stop_hold_time: 0.30
     reentry_debounce: 4.0

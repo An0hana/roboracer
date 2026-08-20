@@ -55,25 +55,34 @@ struct StateMachineConfig
   double minimum_raceline_weight_scale{0.25};
   double maximum_safety_weight_scale{2.0};
 
-  // Reverse-recovery gate: the car is considered stuck when it has been
-  // stationary long enough while the planner is failing / AEB is latched and
-  // the raceline demands more steering than the mechanical limit.
-  double stuck_speed_threshold{0.05};
-  double recovery_entry_time{1.5};
-  double curvature_fraction{0.85};
-  double max_steering{0.32};
+  // Reverse-recovery gate. Failure evidence is held briefly across AEB
+  // debounce/diagnostic transitions, then combined with low progress and
+  // either a genuinely tight turn or a saturated planner steering command.
+  double stuck_speed_threshold{0.08};
+  double recovery_entry_time{0.75};
+  double failure_evidence_hold_time{1.0};
+  double tight_curve_steering_threshold{0.18};
+  double tight_curve_exit_threshold{0.14};
+  double steering_saturation_fraction{0.85};
+  double min_steering{-0.404};
+  double max_steering{0.381};
   double wheelbase{0.324};
 
-  // Reverse command issued by the safety layer while recovering.
-  double reverse_speed{0.5};
+  // Recovery is phased: settle the steering at zero speed, reverse, then
+  // brake to a confirmed stop before handing control back to MPPI.
+  double recovery_settle_time{0.30};
+  double reverse_speed{0.30};
   double reverse_steer_sign{-1.0};
-  double reverse_steer_fraction{1.0};
+  double reverse_steer_fraction{0.90};
 
-  // Recovery exit gate.
+  // Reverse until the turn has eased or the target distance is reached.
+  // Maximum limits are backstops; all exits still pass through BRAKING.
   double recovery_min_reverse_distance{0.3};
+  double recovery_target_reverse_distance{0.6};
   double reverse_max_duration{6.0};
   double reverse_max_distance{1.8};
-  double exit_clear_time{1.0};
+  double recovery_stop_speed_threshold{0.05};
+  double recovery_stop_hold_time{0.30};
   double reentry_debounce{4.0};
 };
 
@@ -95,7 +104,9 @@ struct StateObservation
 
   // Planner / safety failure evidence consumed by the recovery gate.
   bool mppi_solver_failed{false};
+  bool aeb_emergency{false};
   bool aeb_latched{false};
+  double mppi_steering_command{0.0};
   // Steering angle (rad) the raceline needs at the current pose, computed by
   // the node as atan(nearest_curvature * wheelbase).
   double required_steering{0.0};
@@ -141,6 +152,14 @@ public:
   [[nodiscard]] BehaviorState behaviorState() const noexcept;
 
 private:
+  enum class RecoveryPhase : std::uint8_t
+  {
+    IDLE = 0,
+    SETTLING = 1,
+    REVERSING = 2,
+    BRAKING = 3
+  };
+
   [[nodiscard]] double activeFollowDistance(
     const StateObservation & observation) const;
   [[nodiscard]] bool opponentAhead(const StateObservation & observation) const;
@@ -155,8 +174,11 @@ private:
     double now);
   void clearPendingTransition();
   [[nodiscard]] StateCommand command(double now) const;
-  [[nodiscard]] bool stuckAtCurvatureLimit(
+  [[nodiscard]] bool stuckAtTightTurn(
     const StateObservation & observation) const;
+  [[nodiscard]] bool tightTurnEvidence(
+    const StateObservation & observation) const;
+  [[nodiscard]] double steeringLimitForSign(double steering) const;
 
   StateMachineConfig config_;
   SafetyState safety_state_{SafetyState::INIT};
@@ -176,12 +198,16 @@ private:
 
   // Reverse-recovery bookkeeping.
   double required_steering_{0.0};
+  std::optional<double> last_failure_evidence_time_;
   std::optional<double> stuck_since_;
   double recovery_enter_time_{0.0};
+  double recovery_phase_enter_time_{0.0};
   double reverse_distance_{0.0};
-  std::optional<double> recovery_clear_since_;
+  std::optional<double> recovery_stopped_since_;
   double reentry_available_until_{0.0};
   double recovery_steering_{0.0};
+  double recovery_command_speed_{0.0};
+  RecoveryPhase recovery_phase_{RecoveryPhase::IDLE};
 };
 
 }  // namespace state_machine

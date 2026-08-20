@@ -400,6 +400,23 @@ bool clampMeasuredSpeedWithinTolerance(
   return stateWithinLimits(state, vehicle);
 }
 
+double solverFailureCreepSpeed(
+  double mean_curvature, double wheelbase,
+  double tight_curve_steering_threshold, double normal_speed,
+  double tight_curve_speed) noexcept
+{
+  if (!finite(mean_curvature) || !finite(wheelbase) || wheelbase <= 0.0 ||
+    !finite(tight_curve_steering_threshold) || tight_curve_steering_threshold <= 0.0 ||
+    !finite(normal_speed) || normal_speed < 0.0 ||
+    !finite(tight_curve_speed) || tight_curve_speed < 0.0)
+  {
+    return 0.0;
+  }
+  const double required_steering = std::abs(std::atan(wheelbase * mean_curvature));
+  return required_steering >= tight_curve_steering_threshold ?
+         std::min(normal_speed, tight_curve_speed) : normal_speed;
+}
+
 OverspeedRecovery::OverspeedRecovery(OverspeedRecoveryConfig config)
 : config_(config)
 {
@@ -654,6 +671,24 @@ double RaceLine::meanAbsCurvature(
   for (std::ptrdiff_t offset = -half; offset <= half; ++offset) {
     sum += std::abs(
       atWrapped(center_index + offset).curvature);
+  }
+  return sum / static_cast<double>(samples);
+}
+
+double RaceLine::meanCurvature(
+  std::size_t center, std::size_t half_window) const
+{
+  if (!valid()) {
+    return 0.0;
+  }
+  const auto count = static_cast<std::ptrdiff_t>(waypoints_.size());
+  const auto half = std::min<std::ptrdiff_t>(
+    static_cast<std::ptrdiff_t>(half_window), count / 2);
+  const auto center_index = static_cast<std::ptrdiff_t>(center);
+  double sum = 0.0;
+  const std::ptrdiff_t samples = 2 * half + 1;
+  for (std::ptrdiff_t offset = -half; offset <= half; ++offset) {
+    sum += atWrapped(center_index + offset).curvature;
   }
   return sum / static_cast<double>(samples);
 }

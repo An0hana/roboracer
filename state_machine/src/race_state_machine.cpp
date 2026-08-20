@@ -59,21 +59,36 @@ void validateConfig(const StateMachineConfig & config)
     config.stuck_speed_threshold < 0.0 ||
     !finite(config.recovery_entry_time) ||
     config.recovery_entry_time < 0.0 ||
-    !finite(config.curvature_fraction) ||
-    config.curvature_fraction <= 0.0 || config.curvature_fraction > 1.0 ||
-    !finite(config.max_steering) || config.max_steering <= 0.0 ||
+    !finite(config.failure_evidence_hold_time) ||
+    config.failure_evidence_hold_time < 0.0 ||
+    !finite(config.tight_curve_steering_threshold) ||
+    config.tight_curve_steering_threshold <= 0.0 ||
+    !finite(config.tight_curve_exit_threshold) ||
+    config.tight_curve_exit_threshold < 0.0 ||
+    config.tight_curve_exit_threshold >= config.tight_curve_steering_threshold ||
+    !finite(config.steering_saturation_fraction) ||
+    config.steering_saturation_fraction <= 0.0 ||
+    config.steering_saturation_fraction > 1.0 ||
+    !finite(config.min_steering) || !finite(config.max_steering) ||
+    config.min_steering >= 0.0 || config.max_steering <= 0.0 ||
     !finite(config.wheelbase) || config.wheelbase <= 0.0 ||
+    !finite(config.recovery_settle_time) || config.recovery_settle_time < 0.0 ||
     !finite(config.reverse_speed) || config.reverse_speed < 0.0 ||
     !std::isfinite(config.reverse_steer_sign) ||
     !finite(config.reverse_steer_fraction) ||
     config.reverse_steer_fraction < 0.0 || config.reverse_steer_fraction > 1.0 ||
     !finite(config.recovery_min_reverse_distance) ||
     config.recovery_min_reverse_distance < 0.0 ||
+    !finite(config.recovery_target_reverse_distance) ||
+    config.recovery_target_reverse_distance < config.recovery_min_reverse_distance ||
     !finite(config.reverse_max_duration) ||
     config.reverse_max_duration < 0.0 ||
     !finite(config.reverse_max_distance) ||
-    config.reverse_max_distance < 0.0 ||
-    !finite(config.exit_clear_time) || config.exit_clear_time < 0.0 ||
+    config.reverse_max_distance < config.recovery_target_reverse_distance ||
+    !finite(config.recovery_stop_speed_threshold) ||
+    config.recovery_stop_speed_threshold < 0.0 ||
+    !finite(config.recovery_stop_hold_time) ||
+    config.recovery_stop_hold_time < 0.0 ||
     !finite(config.reentry_debounce) || config.reentry_debounce < 0.0)
   {
     throw std::invalid_argument("invalid race state machine configuration");
@@ -127,7 +142,9 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
     !finite(observation.opponent_longitudinal_speed) ||
     !finite(observation.left_clearance_score) ||
     !finite(observation.right_clearance_score) ||
-    !finite(observation.track_confidence))
+    !finite(observation.track_confidence) ||
+    !finite(observation.required_steering) ||
+    !finite(observation.mppi_steering_command))
   {
     throw std::invalid_argument("state observation must be finite");
   }
@@ -147,6 +164,11 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
     last_opponent_seen_time_ = observation.time;
   }
   required_steering_ = observation.required_steering;
+  if (observation.mppi_solver_failed || observation.aeb_emergency ||
+    observation.aeb_latched)
+  {
+    last_failure_evidence_time_ = observation.time;
+  }
 
   if (safety_state_ == SafetyState::READY && !observation.inputs_ready) {
     transitionSafety(SafetyState::FAULT, "stale_or_missing_input", observation.time);
@@ -191,55 +213,105 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
       }
       break;
     case SafetyState::READY:
-      if (stuckAtCurvatureLimit(observation)) {
+      if (stuckAtTightTurn(observation)) {
         if (!stuck_since_.has_value()) {
           stuck_since_ = observation.time;
         }
         if (observation.time - *stuck_since_ >= config_.recovery_entry_time) {
           transitionSafety(
-            SafetyState::RECOVERY, "stuck_curvature_exceeds_limit", observation.time);
+            SafetyState::RECOVERY, "recovery_settling", observation.time);
           recovery_enter_time_ = observation.time;
+          recovery_phase_enter_time_ = observation.time;
           reverse_distance_ = 0.0;
-          recovery_clear_since_.reset();
-          recovery_steering_ = config_.reverse_steer_sign *
-            std::copysign(
-              config_.reverse_steer_fraction * config_.max_steering,
-              observation.required_steering);
+          recovery_stopped_since_.reset();
+          recovery_phase_ = RecoveryPhase::SETTLING;
+          recovery_command_speed_ = 0.0;
+          const double turn_steering =
+            std::abs(observation.required_steering) > 1.0e-6 ?
+            observation.required_steering : observation.mppi_steering_command;
+          const double recovery_sign = config_.reverse_steer_sign *
+            std::copysign(1.0, turn_steering);
+          recovery_steering_ = recovery_sign * config_.reverse_steer_fraction *
+            steeringLimitForSign(recovery_sign);
         }
       } else {
         stuck_since_.reset();
       }
       break;
     case SafetyState::RECOVERY:
-      if (dt > 0.0 && std::isfinite(observation.ego_speed)) {
-        reverse_distance_ += std::abs(observation.ego_speed) * dt;
+      // Only actual rearward motion contributes to reverse progress. Residual
+      // forward coast while entering recovery must not satisfy the exit gate.
+      if (dt > 0.0 && observation.ego_speed < 0.0) {
+        reverse_distance_ += -observation.ego_speed * dt;
       }
-      {
-        const double recovery_duration = observation.time - recovery_enter_time_;
-        const bool force_exit =
-          recovery_duration >= config_.reverse_max_duration ||
-          reverse_distance_ >= config_.reverse_max_distance;
-        const bool clear =
-          !observation.mppi_solver_failed && !observation.aeb_latched;
-        if (clear) {
-          if (!recovery_clear_since_.has_value()) {
-            recovery_clear_since_ = observation.time;
-          }
-          if (!force_exit &&
-            observation.time - *recovery_clear_since_ >= config_.exit_clear_time &&
-            reverse_distance_ >= config_.recovery_min_reverse_distance)
+      switch (recovery_phase_) {
+        case RecoveryPhase::IDLE:
+          // Defensive fallback for an impossible internal state.
+          recovery_phase_ = RecoveryPhase::BRAKING;
+          recovery_phase_enter_time_ = observation.time;
+          recovery_command_speed_ = 0.0;
+          reason_ = "recovery_braking";
+          break;
+        case RecoveryPhase::SETTLING:
+          recovery_command_speed_ = 0.0;
+          if (observation.time - recovery_phase_enter_time_ >=
+              config_.recovery_settle_time &&
+            std::abs(observation.ego_speed) <= config_.stuck_speed_threshold)
           {
-            reentry_available_until_ = observation.time + config_.reentry_debounce;
-            transitionSafety(SafetyState::READY, "recovery_complete", observation.time);
+            recovery_phase_ = RecoveryPhase::REVERSING;
+            recovery_phase_enter_time_ = observation.time;
+            recovery_command_speed_ = config_.reverse_speed;
+            reason_ = "recovery_reversing";
           }
-        } else {
-          recovery_clear_since_.reset();
+          break;
+        case RecoveryPhase::REVERSING:
+        {
+          recovery_command_speed_ = config_.reverse_speed;
+          const double recovery_duration = observation.time - recovery_enter_time_;
+          const bool minimum_distance_reached =
+            reverse_distance_ >= config_.recovery_min_reverse_distance;
+          const bool turn_eased =
+            std::abs(observation.required_steering) <=
+            config_.tight_curve_exit_threshold;
+          const bool target_distance_reached =
+            reverse_distance_ >= config_.recovery_target_reverse_distance;
+          const bool limit_reached =
+            recovery_duration >= config_.reverse_max_duration ||
+            reverse_distance_ >= config_.reverse_max_distance;
+          if ((minimum_distance_reached &&
+            (turn_eased || target_distance_reached)) || limit_reached)
+          {
+            recovery_phase_ = RecoveryPhase::BRAKING;
+            recovery_phase_enter_time_ = observation.time;
+            recovery_command_speed_ = 0.0;
+            recovery_stopped_since_.reset();
+            reason_ = limit_reached ?
+              "recovery_braking_limit" : "recovery_braking";
+          }
+          break;
         }
-        if (force_exit && safety_state_ == SafetyState::RECOVERY) {
-          reentry_available_until_ = observation.time + config_.reentry_debounce;
-          transitionSafety(SafetyState::READY, "recovery_limit", observation.time);
+        case RecoveryPhase::BRAKING:
+          recovery_command_speed_ = 0.0;
+          if (std::abs(observation.ego_speed) <=
+            config_.recovery_stop_speed_threshold)
+          {
+            if (!recovery_stopped_since_.has_value()) {
+              recovery_stopped_since_ = observation.time;
+            }
+            if (observation.time - *recovery_stopped_since_ >=
+              config_.recovery_stop_hold_time)
+            {
+              reentry_available_until_ = observation.time + config_.reentry_debounce;
+              recovery_phase_ = RecoveryPhase::IDLE;
+              recovery_command_speed_ = 0.0;
+              transitionSafety(
+                SafetyState::READY, "recovery_complete_stopped", observation.time);
+            }
+          } else {
+            recovery_stopped_since_.reset();
+          }
+          break;
         }
-      }
       break;
   }
 
@@ -334,14 +406,35 @@ BehaviorState RaceStateMachine::behaviorState() const noexcept
   return behavior_state_;
 }
 
-bool RaceStateMachine::stuckAtCurvatureLimit(
+bool RaceStateMachine::stuckAtTightTurn(
   const StateObservation & observation) const
 {
+  const bool failure_evidence_fresh = last_failure_evidence_time_.has_value() &&
+    observation.time - *last_failure_evidence_time_ <=
+    config_.failure_evidence_hold_time;
+  const bool current_failure = observation.mppi_solver_failed ||
+    observation.aeb_emergency || observation.aeb_latched;
   return std::abs(observation.ego_speed) < config_.stuck_speed_threshold &&
-         (observation.mppi_solver_failed || observation.aeb_latched) &&
-         std::abs(observation.required_steering) >
-           config_.curvature_fraction * config_.max_steering &&
+         (current_failure || (stuck_since_.has_value() && failure_evidence_fresh)) &&
+         tightTurnEvidence(observation) &&
          observation.time >= reentry_available_until_;
+}
+
+bool RaceStateMachine::tightTurnEvidence(
+  const StateObservation & observation) const
+{
+  const double command_limit = steeringLimitForSign(
+    observation.mppi_steering_command);
+  const bool steering_saturated = command_limit > 0.0 &&
+    std::abs(observation.mppi_steering_command) >=
+    config_.steering_saturation_fraction * command_limit;
+  return std::abs(observation.required_steering) >=
+         config_.tight_curve_steering_threshold || steering_saturated;
+}
+
+double RaceStateMachine::steeringLimitForSign(double steering) const
+{
+  return steering < 0.0 ? std::abs(config_.min_steering) : config_.max_steering;
 }
 
 bool RaceStateMachine::opponentAhead(const StateObservation & observation) const
@@ -395,6 +488,12 @@ bool RaceStateMachine::transitionConfirmed(
 void RaceStateMachine::transitionSafety(
   SafetyState target, const std::string & reason, double now)
 {
+  stuck_since_.reset();
+  if (target != SafetyState::RECOVERY) {
+    recovery_phase_ = RecoveryPhase::IDLE;
+    recovery_command_speed_ = 0.0;
+    recovery_stopped_since_.reset();
+  }
   safety_state_ = target;
   behavior_state_ = BehaviorState::RACING;
   preferred_side_ = PreferredSide::NONE;
@@ -450,7 +549,7 @@ StateCommand RaceStateMachine::command(double now) const
   output.stop_requested = safety_state_ != SafetyState::READY;
   output.recovery_active = safety_state_ == SafetyState::RECOVERY;
   if (output.recovery_active) {
-    output.recovery_speed = config_.reverse_speed;
+    output.recovery_speed = recovery_command_speed_;
     output.recovery_steering = recovery_steering_;
   }
   if (output.stop_requested) {

@@ -290,6 +290,8 @@ def generate_launch_description():
             ),
             "odom_topic": odom_topic,
             "race_line_file": race_line_file,
+            "min_steering": min_steering,
+            "max_steering": max_steering,
             "use_sim_time": "false",
         },
         IfCondition(enable_behavior_stack),

@@ -285,6 +285,33 @@ TEST(RaceLine, MeanAbsCurvatureAveragesMagnitudes)
   EXPECT_NEAR(line.meanAbsCurvature(5U, 2U), (4.0 + 5.0 + 6.0 + 7.0 + 8.0) / 5.0, 1.0e-9);
 }
 
+TEST(RaceLine, SignedMeanCurvaturePreservesDirectionAndCancelsSBends)
+{
+  const RaceLine line = makeCurvatureLine(curvatureAlternatingSign());
+  // idx 3..7 = +4, -5, +6, -7, +8 with the generator's parity.
+  EXPECT_NEAR(line.meanCurvature(5U, 2U), (4.0 - 5.0 + 6.0 - 7.0 + 8.0) / 5.0, 1.0e-9);
+  EXPECT_NEAR(line.meanCurvature(5U, 0U), 6.0, 1.0e-9);
+
+  const RaceLine uniform = makeCircle(false, 1.0);
+  EXPECT_NEAR(std::abs(uniform.meanCurvature(40U, 5U)), 0.2, 1.0e-9);
+}
+
+TEST(Recovery, SolverFailureCreepSlowsButDoesNotStopInTightTurn)
+{
+  constexpr double wheelbase = 0.324;
+  constexpr double threshold = 0.18;
+  EXPECT_DOUBLE_EQ(
+    solverFailureCreepSpeed(0.20, wheelbase, threshold, 1.0, 0.25), 1.0);
+  EXPECT_DOUBLE_EQ(
+    solverFailureCreepSpeed(0.70, wheelbase, threshold, 1.0, 0.25), 0.25);
+  EXPECT_DOUBLE_EQ(
+    solverFailureCreepSpeed(-0.70, wheelbase, threshold, 1.0, 0.25), 0.25);
+  EXPECT_DOUBLE_EQ(
+    solverFailureCreepSpeed(
+      std::numeric_limits<double>::quiet_NaN(), wheelbase,
+      threshold, 1.0, 0.25), 0.0);
+}
+
 TEST(DistanceField, RepresentsObstaclesUnknownCellsAndRotatedOrigins)
 {
   std::vector<std::int8_t> grid(25U, 0);

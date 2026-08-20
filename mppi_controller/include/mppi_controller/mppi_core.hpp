@@ -177,6 +177,11 @@ struct TrackProjection
   double distance{std::numeric_limits<double>::infinity()};
 };
 
+[[nodiscard]] double solverFailureCreepSpeed(
+  double mean_curvature, double wheelbase,
+  double tight_curve_steering_threshold, double normal_speed,
+  double tight_curve_speed) noexcept;
+
 class RaceLine
 {
 public:
@@ -200,6 +205,10 @@ public:
   // Mean |curvature| over the closed-loop window [center-half, center+half].
   // half_window == 0 collapses to a single point; an invalid/empty line yields 0.0.
   [[nodiscard]] double meanAbsCurvature(
+    std::size_t center, std::size_t half_window) const;
+  // Signed window mean used for turn direction and to avoid treating an
+  // alternating S-bend as one sustained high-curvature corner.
+  [[nodiscard]] double meanCurvature(
     std::size_t center, std::size_t half_window) const;
 
 private:

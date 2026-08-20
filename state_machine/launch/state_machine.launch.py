@@ -3,6 +3,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 import os
 
 
@@ -13,6 +14,8 @@ def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     odom_topic = LaunchConfiguration("odom_topic")
     race_line_file = LaunchConfiguration("race_line_file")
+    min_steering = LaunchConfiguration("min_steering")
+    max_steering = LaunchConfiguration("max_steering")
     use_sim_time = LaunchConfiguration("use_sim_time")
 
     return LaunchDescription(
@@ -31,6 +34,8 @@ def generate_launch_description():
                 default_value="false",
                 description="Use ROS simulation clock",
             ),
+            DeclareLaunchArgument("min_steering", default_value="-0.404"),
+            DeclareLaunchArgument("max_steering", default_value="0.381"),
             DeclareLaunchArgument(
                 "params_file",
                 default_value=default_params,
@@ -46,6 +51,12 @@ def generate_launch_description():
                     {
                         "odom_topic": odom_topic,
                         "race_line_file": race_line_file,
+                        "min_steering": ParameterValue(
+                            min_steering, value_type=float
+                        ),
+                        "max_steering": ParameterValue(
+                            max_steering, value_type=float
+                        ),
                         "use_sim_time": use_sim_time,
                     },
                 ],

@@ -69,6 +69,9 @@ safety_controller:
     aeb_release_check_speed: 1.500
     aeb_max_latch_duration: 1.5
     aeb_debounce_duration: 0.50
+    # Debounce is a monotonic cap: it may lower a forward command but never
+    # turn an upstream stop into propulsion.
+    aeb_soft_speed_limit: 0.80
     aeb_resume_acceleration: 1.000
     # Keep propulsion at zero while allowing a bounded steering-only recovery
     # after the vehicle has slowed below 0.10 m/s. AEB releases only after the

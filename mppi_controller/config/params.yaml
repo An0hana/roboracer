@@ -125,13 +125,13 @@ mppi_controller:
       max_speed: 2.0
 
     creep:
-      # Solver-failure creep gate.  Curvature is averaged over a closed-loop
-      # window of ± curvature_window_points around the projected raceline point
-      # (spacing ~0.1 m => ±5 points ≈ ±0.5 m).  If the windowed turn needs more
-      # steering than curvature_fraction * vehicle.max_steering, creeping is
-      # physically futile: stop (curvature_infeasible) so reverse-recovery runs.
+      # A transient solver failure keeps a bounded forward fallback. Tight
+      # turns reduce that fallback instead of hard-stopping on one failed tick;
+      # the state machine confirms low progress before requesting reverse.
       curvature_window_points: 5
-      curvature_fraction: 1.0
+      tight_curve_steering_threshold: 0.18
+      normal_speed: 1.0
+      tight_curve_speed: 0.25
 
     steering_estimator:
       # Above this speed, correct the actuator prediction with effective
