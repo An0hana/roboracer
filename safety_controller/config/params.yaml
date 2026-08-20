@@ -6,6 +6,7 @@ safety_controller:
     odom_topic: "/state_estimation/odom"
     mppi_cmd_topic: "/control/mppi_cmd"
     ftg_cmd_topic: "/control/ftg_cmd"
+    race_state_topic: "/state_machine/state"
     output_topic: "/ackermann_cmd"
     diagnostics_topic: "/diagnostics"
     output_frame: "base_link"
@@ -23,8 +24,12 @@ safety_controller:
     command_timeout: 0.100
     min_command_speed: 0.0
     max_command_speed: 2.0
-    min_command_steering: -0.32
-    max_command_steering: 0.32
+    # Negative speed is accepted only while a fresh RaceState explicitly
+    # reports RECOVERY/REVERSE. Normal MPPI and all FTG commands remain >= 0.
+    recovery_min_command_speed: -0.30
+    recovery_state_timeout: 0.150
+    min_command_steering: -0.40
+    max_command_steering: 0.38
     steering_response_time: 0.150
     min_effective_steering_rate: -1.20
     max_effective_steering_rate: 1.20

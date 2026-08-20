@@ -11,6 +11,7 @@ def generate_launch_description():
     scan_topic = LaunchConfiguration("scan_topic")
     odom_topic = LaunchConfiguration("odom_topic")
     mppi_cmd_topic = LaunchConfiguration("mppi_cmd_topic")
+    race_state_topic = LaunchConfiguration("race_state_topic")
     output_topic = LaunchConfiguration("output_topic")
     max_speed = LaunchConfiguration("max_speed")
     min_steering = LaunchConfiguration("min_steering")
@@ -32,10 +33,13 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "mppi_cmd_topic", default_value="/control/mppi_cmd"
             ),
+            DeclareLaunchArgument(
+                "race_state_topic", default_value="/state_machine/state"
+            ),
             DeclareLaunchArgument("output_topic", default_value="/ackermann_cmd"),
             DeclareLaunchArgument("max_speed", default_value="2.0"),
-            DeclareLaunchArgument("min_steering", default_value="-0.32"),
-            DeclareLaunchArgument("max_steering", default_value="0.32"),
+            DeclareLaunchArgument("min_steering", default_value="-0.40"),
+            DeclareLaunchArgument("max_steering", default_value="0.38"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             Node(
                 package="safety_controller",
@@ -48,6 +52,7 @@ def generate_launch_description():
                         "scan_topic": scan_topic,
                         "odom_topic": odom_topic,
                         "mppi_cmd_topic": mppi_cmd_topic,
+                        "race_state_topic": race_state_topic,
                         "output_topic": output_topic,
                         "max_command_speed": ParameterValue(
                             max_speed, value_type=float

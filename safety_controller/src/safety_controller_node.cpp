@@ -13,6 +13,7 @@
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
 #include "diagnostic_msgs/msg/key_value.hpp"
 #include "nav_msgs/msg/odometry.hpp"
+#include "roboracer_msgs/msg/race_state.hpp"
 #include "safety_controller/safety_core.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -60,6 +61,8 @@ public:
       "ftg_cmd_topic", "/control/ftg_cmd");
     const std::string output_topic = declare_parameter<std::string>(
       "output_topic", "/ackermann_cmd");
+    const std::string race_state_topic = declare_parameter<std::string>(
+      "race_state_topic", "/state_machine/state");
     const std::string diagnostics_topic = declare_parameter<std::string>(
       "diagnostics_topic", "/diagnostics");
     output_frame_ = declare_parameter<std::string>("output_frame", "base_link");
@@ -81,10 +84,14 @@ public:
       "stop_steering_center_speed", 0.050);
     config.min_command_speed = declare_parameter<double>("min_command_speed", 0.0);
     config.max_command_speed = declare_parameter<double>("max_command_speed", 2.0);
+    config.recovery_min_command_speed = declare_parameter<double>(
+      "recovery_min_command_speed", -0.30);
+    config.recovery_state_timeout = declare_parameter<double>(
+      "recovery_state_timeout", 0.150);
     config.min_command_steering = declare_parameter<double>(
-      "min_command_steering", -0.32);
+      "min_command_steering", -0.40);
     config.max_command_steering = declare_parameter<double>(
-      "max_command_steering", 0.32);
+      "max_command_steering", 0.38);
     config.steering_response_time = declare_parameter<double>(
       "steering_response_time", 0.150);
     config.min_effective_steering_rate = declare_parameter<double>(
@@ -173,6 +180,19 @@ public:
       ftg_topic, rclcpp::QoS(10),
       [this](ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr message) {
         commandCallback(ControllerMode::kFtg, *message);
+      });
+    race_state_subscription_ = create_subscription<roboracer_msgs::msg::RaceState>(
+      race_state_topic, rclcpp::QoS(10),
+      [this](roboracer_msgs::msg::RaceState::ConstSharedPtr message) {
+        const bool reverse_authorized =
+          message->safety_state == roboracer_msgs::msg::RaceState::SAFETY_READY &&
+          message->behavior_state == roboracer_msgs::msg::RaceState::BEHAVIOR_RECOVERY &&
+          message->recovery_phase ==
+          roboracer_msgs::msg::RaceState::RECOVERY_PHASE_REVERSE &&
+          !message->stop_requested;
+        std::lock_guard<std::mutex> lock(core_mutex_);
+        core_->updateRecoveryAuthorization(
+          reverse_authorized, sourceTimeOrNow(message->header.stamp));
       });
 
     parameter_callback_handle_ = add_on_set_parameters_callback(
@@ -315,6 +335,16 @@ private:
     status.values.push_back(diagnosticValue("scan_age_s", std::to_string(result.scan_age)));
     status.values.push_back(diagnosticValue("command_age_s", std::to_string(result.command_age)));
     status.values.push_back(
+      diagnosticValue("recovery_state_age_s", std::to_string(result.recovery_state_age)));
+    status.values.push_back(
+      diagnosticValue(
+        "recovery_reverse_authorized",
+        result.recovery_reverse_authorized ? "true" : "false"));
+    status.values.push_back(
+      diagnosticValue(
+        "active_min_command_speed_mps",
+        std::to_string(result.active_min_command_speed)));
+    status.values.push_back(
       diagnosticValue(
         "aeb_emergency", result.aeb.emergency ? "true" : "false"));
     status.values.push_back(
@@ -374,6 +404,7 @@ private:
   rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
     mppi_subscription_;
   rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr ftg_subscription_;
+  rclcpp::Subscription<roboracer_msgs::msg::RaceState>::SharedPtr race_state_subscription_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 };

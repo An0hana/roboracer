@@ -59,8 +59,12 @@ struct SafetyConfig
   // is a fault, not a value for the hardware driver to clamp silently.
   double min_command_speed{0.0};
   double max_command_speed{2.0};
-  double min_command_steering{-0.32};
-  double max_command_steering{0.32};
+  // Negative commands remain forbidden unless a fresh RaceState explicitly
+  // authorizes the MPPI reverse-recovery phase.
+  double recovery_min_command_speed{-0.30};
+  double recovery_state_timeout{0.150};
+  double min_command_steering{-0.40};
+  double max_command_steering{0.38};
   // Keep the independent AEB prediction consistent with MPPI's actuator
   // model. The target command remains unconstrained by these physical
   // response parameters; only the estimated effective wheel angle follows
@@ -126,6 +130,9 @@ struct ArbitrationResult
   double state_age{std::numeric_limits<double>::infinity()};
   double scan_age{std::numeric_limits<double>::infinity()};
   double command_age{std::numeric_limits<double>::infinity()};
+  double recovery_state_age{std::numeric_limits<double>::infinity()};
+  double active_min_command_speed{0.0};
+  bool recovery_reverse_authorized{false};
   bool aeb_latched{false};
   bool aeb_resume_active{false};
   double aeb_clear_duration{0.0};
@@ -152,6 +159,7 @@ public:
   void updateScan(const ScanData & scan, double now_seconds);
   void updateCommand(
     ControllerMode source, const DriveCommand & command, double now_seconds);
+  void updateRecoveryAuthorization(bool reverse_authorized, double now_seconds);
 
   /// Returns false when a live mode change is unsafe. Selecting the current mode is idempotent.
   bool requestMode(ControllerMode requested, double now_seconds);
@@ -202,6 +210,10 @@ private:
   bool state_valid_{false};
   double state_stamp_{0.0};
   double current_speed_{0.0};
+  bool recovery_state_received_{false};
+  bool recovery_state_valid_{false};
+  bool recovery_reverse_authorized_{false};
+  double recovery_state_stamp_{0.0};
   double measured_steering_angle_{0.0};
   double estimated_effective_steering_angle_{0.0};
   double output_steering_angle_{0.0};

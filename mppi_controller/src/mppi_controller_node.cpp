@@ -179,8 +179,8 @@ private:
     declare_parameter<double>("vehicle.rear_overhang", 0.124);
     declare_parameter<double>("vehicle.width", 0.320);
     declare_parameter<double>("vehicle.safety_margin", 0.05);
-    declare_parameter<double>("vehicle.min_steering", -0.32);
-    declare_parameter<double>("vehicle.max_steering", 0.32);
+    declare_parameter<double>("vehicle.min_steering", -0.40);
+    declare_parameter<double>("vehicle.max_steering", 0.38);
     declare_parameter<double>("vehicle.min_steering_rate", -1.5);
     declare_parameter<double>("vehicle.max_steering_rate", 1.5);
     declare_parameter<double>("vehicle.steering_response_time", 0.15);
