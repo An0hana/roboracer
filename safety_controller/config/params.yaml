@@ -26,7 +26,10 @@ safety_controller:
     max_command_speed: 2.0
     # Negative speed is accepted only while a fresh RaceState explicitly
     # reports RECOVERY/REVERSE. Normal MPPI and all FTG commands remain >= 0.
-    recovery_min_command_speed: -0.30
+    # Must cover MPPI's -0.40 m/s straight recovery command with a small
+    # float/measurement margin. Reverse remains authorized only by a fresh
+    # RECOVERY/REVERSE RaceState.
+    recovery_min_command_speed: -0.45
     recovery_state_timeout: 0.150
     min_command_steering: -0.40
     max_command_steering: 0.38

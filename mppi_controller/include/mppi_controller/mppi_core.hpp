@@ -270,6 +270,17 @@ struct Obstacle
   const State & state, const VehicleConfig & vehicle,
   const DistanceField * distance_field);
 
+// Validates the clearance margins sampled along an explicitly authorized
+// straight reverse recovery. A recovery may start just inside the inflated
+// safety envelope when the front bumper is the contact that caused the car to
+// stop, but it must leave that envelope without a material regression and end
+// with positive clearance. The state machine independently certifies that the
+// rear swept corridor is clear before it requests this maneuver.
+[[nodiscard]] bool reverseRecoveryClearanceSafe(
+  const std::vector<double> & margins,
+  double initial_clearance_tolerance,
+  double clearance_regression_tolerance);
+
 struct CostWeights
 {
   double lateral{12.0};

@@ -61,7 +61,7 @@ struct SafetyConfig
   double max_command_speed{2.0};
   // Negative commands remain forbidden unless a fresh RaceState explicitly
   // authorizes the MPPI reverse-recovery phase.
-  double recovery_min_command_speed{-0.30};
+  double recovery_min_command_speed{-0.45};
   double recovery_state_timeout{0.150};
   double min_command_steering{-0.40};
   double max_command_steering{0.38};

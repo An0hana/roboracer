@@ -572,7 +572,7 @@ TEST(SafetyCore, ReverseRequiresFreshRecoveryAuthorization)
   SafetyCore core(config);
   core.updateState(0.0, 0.0, 1.0);
   core.updateScan(clearScan(), 1.0);
-  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.25, 0.0}, 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.40, 0.0}, 1.0);
 
   ArbitrationResult result = core.evaluate(1.01);
   EXPECT_EQ(result.stop_reason, StopReason::kInvalidCommand);
@@ -581,18 +581,18 @@ TEST(SafetyCore, ReverseRequiresFreshRecoveryAuthorization)
   core.updateRecoveryAuthorization(true, 1.02);
   core.updateState(0.0, 0.0, 1.02);
   core.updateScan(clearScan(), 1.02);
-  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.25, 0.0}, 1.02);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.40, 0.0}, 1.02);
   result = core.evaluate(1.03);
   EXPECT_EQ(result.stop_reason, StopReason::kNone);
   EXPECT_TRUE(result.recovery_reverse_authorized);
-  EXPECT_DOUBLE_EQ(result.command.speed, -0.25);
+  EXPECT_DOUBLE_EQ(result.command.speed, -0.40);
   EXPECT_DOUBLE_EQ(result.active_min_command_speed, config.recovery_min_command_speed);
 
   // Refresh every required input except the authorization. A stale recovery
   // state must fail closed even while MPPI continues publishing reverse.
   core.updateState(0.0, 0.0, 1.20);
   core.updateScan(clearScan(), 1.20);
-  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.25, 0.0}, 1.20);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-0.40, 0.0}, 1.20);
   result = core.evaluate(1.21);
   EXPECT_EQ(result.stop_reason, StopReason::kInvalidCommand);
   EXPECT_FALSE(result.recovery_reverse_authorized);

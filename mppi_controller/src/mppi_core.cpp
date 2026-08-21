@@ -1194,6 +1194,46 @@ double vehicleFootprintClearance(
   return minimum;
 }
 
+bool reverseRecoveryClearanceSafe(
+  const std::vector<double> & margins,
+  double initial_clearance_tolerance,
+  double clearance_regression_tolerance)
+{
+  if (margins.empty() || !std::isfinite(initial_clearance_tolerance) ||
+    initial_clearance_tolerance < 0.0 ||
+    !std::isfinite(clearance_regression_tolerance) ||
+    clearance_regression_tolerance < 0.0)
+  {
+    return false;
+  }
+
+  double previous = margins.front();
+  if (!std::isfinite(previous) || previous < -initial_clearance_tolerance) {
+    return false;
+  }
+  for (std::size_t index = 1U; index < margins.size(); ++index) {
+    const double current = margins[index];
+    if (!std::isfinite(current) || current < -initial_clearance_tolerance) {
+      return false;
+    }
+    // Once the full safety margin has been restored, never permit the sampled
+    // path to enter it again.
+    if (previous >= 0.0 && current < 0.0) {
+      return false;
+    }
+    // A 5 cm occupancy grid quantizes the disk-chain clearance. Recorded
+    // recovery paths showed harmless one-cell-boundary regressions up to
+    // 17.5 mm while their endpoint gained 17-23 cm of clearance.
+    if (previous < 0.0 &&
+      current + clearance_regression_tolerance < previous)
+    {
+      return false;
+    }
+    previous = current;
+  }
+  return previous >= 0.0;
+}
+
 bool CpuMppiBackend::stateSafe(
   const State & state, const RaceLine & race_line,
   const DistanceField * distance_field,

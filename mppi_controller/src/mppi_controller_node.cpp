@@ -151,11 +151,12 @@ private:
     declare_parameter<double>("recovery.stuck_minimum_clearance", 0.05);
     declare_parameter<double>("recovery.stuck_timeout", 1.50);
     declare_parameter<double>("recovery.stuck_cooldown", 2.00);
-    declare_parameter<double>("recovery.reverse_speed", 0.25);
+    declare_parameter<double>("recovery.reverse_speed", 0.40);
     declare_parameter<double>("recovery.reverse_distance", 0.40);
     declare_parameter<double>("recovery.reverse_sample_step", 0.025);
     declare_parameter<double>("recovery.entry_stop_time", 0.30);
-    declare_parameter<double>("recovery.initial_clearance_tolerance", 0.08);
+    declare_parameter<double>("recovery.initial_clearance_tolerance", 0.13);
+    declare_parameter<double>("recovery.clearance_regression_tolerance", 0.025);
     declare_parameter<int>("mppi.random_seed", 7);
     declare_parameter<int>("mppi.nearest_search_radius", 80);
     declare_parameter<double>("mppi.cbf_gamma", 0.35);
@@ -432,6 +433,8 @@ private:
       recovery_entry_stop_time_ = parameter<double>("recovery.entry_stop_time");
       recovery_initial_clearance_tolerance_ =
         parameter<double>("recovery.initial_clearance_tolerance");
+      recovery_clearance_regression_tolerance_ =
+        parameter<double>("recovery.clearance_regression_tolerance");
       if (!positive(control_frequency_) || !positive(state_timeout_) ||
         !positive(costmap_timeout_) || !positive(costmap_processing_frequency_) ||
         !positive(output_timeout_) || !positive(tf_timeout_) || !positive(max_solve_time_ms_) ||
@@ -453,6 +456,8 @@ private:
         !std::isfinite(recovery_entry_stop_time_) || recovery_entry_stop_time_ < 0.0 ||
         !std::isfinite(recovery_initial_clearance_tolerance_) ||
         recovery_initial_clearance_tolerance_ < 0.0 ||
+        !std::isfinite(recovery_clearance_regression_tolerance_) ||
+        recovery_clearance_regression_tolerance_ < 0.0 ||
         occupied_threshold_ < 0 || occupied_threshold_ > 100)
       {
         error = "node timing or occupancy parameters are out of range";
@@ -906,31 +911,16 @@ private:
           vehicleFootprintClearance(state, vehicle_, distance_field),
           obstacleClearance(state, vehicle_, obstacles, time)) - vehicle_.safety_margin;
       };
-    double previous_margin = margin(path.front(), 0.0);
-    if (!std::isfinite(previous_margin) ||
-      previous_margin < -recovery_initial_clearance_tolerance_)
-    {
-      return false;
-    }
+    std::vector<double> margins;
+    margins.reserve(path.size());
     const double dt = recovery_reverse_sample_step_ / recovery_reverse_speed_;
-    for (std::size_t index = 1U; index < path.size(); ++index) {
-      const double current_margin = margin(path[index], dt * static_cast<double>(index));
-      if (!std::isfinite(current_margin) ||
-        current_margin < -recovery_initial_clearance_tolerance_)
-      {
-        return false;
-      }
-      if (previous_margin >= 0.0 && current_margin < 0.0) {
-        return false;
-      }
-      // If the vehicle starts just inside the soft safety envelope, recovery
-      // may continue only while clearance improves monotonically.
-      if (previous_margin < 0.0 && current_margin + 0.005 < previous_margin) {
-        return false;
-      }
-      previous_margin = current_margin;
+    for (std::size_t index = 0U; index < path.size(); ++index) {
+      margins.push_back(
+        margin(path[index], dt * static_cast<double>(index)));
     }
-    return previous_margin >= 0.0;
+    return reverseRecoveryClearanceSafe(
+      margins, recovery_initial_clearance_tolerance_,
+      recovery_clearance_regression_tolerance_);
   }
 
   void publishRecoveryCommand(
@@ -1713,11 +1703,12 @@ private:
   double stuck_minimum_clearance_{0.05};
   double stuck_timeout_{1.50};
   double stuck_cooldown_{2.00};
-  double recovery_reverse_speed_{0.25};
+  double recovery_reverse_speed_{0.40};
   double recovery_reverse_distance_{0.40};
   double recovery_reverse_sample_step_{0.025};
   double recovery_entry_stop_time_{0.30};
-  double recovery_initial_clearance_tolerance_{0.08};
+  double recovery_initial_clearance_tolerance_{0.13};
+  double recovery_clearance_regression_tolerance_{0.025};
   double active_recovery_speed_threshold_{
     std::numeric_limits<double>::quiet_NaN()};
   double active_measured_speed_{

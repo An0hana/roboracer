@@ -7,10 +7,19 @@ pose_odom:
 
     tracked_pose_topic: "/tracked_pose"   # geometry_msgs/PoseStamped (Cartographer)
     vesc_topic: "/sensors/core"           # vesc_msgs/VescStateStamped
+    imu_topic: "/imu/data_raw"            # sensor_msgs/Imu
     odom_topic: "/state_estimation/odom"  # nav_msgs/Odometry (output)
+    trusted_topic: "/state_estimation/pose_trusted"  # std_msgs/Bool
 
-    # Frame of /tracked_pose. Cartographer's map_frame is "map".
-    odom_frame: "map"
+    # Where the map-frame pose comes from.
+    #   "tracked_pose" - Cartographer's /tracked_pose topic.
+    #   "tf"           - look up map->base_link from TF. Required for AMCL,
+    #                    which publishes map->odom and has no pose topic at
+    #                    controller rate.
+    map_pose_source: "tracked_pose"
+
+    map_frame: "map"
+    odom_frame: "odom"
     base_frame: "base_link"
 
     # Cartographer tracks gyro_link, located 0.25 m ahead of the rear-axle
@@ -18,75 +27,108 @@ pose_odom:
     tracking_offset_x: 0.25
     tracking_offset_y: 0.0
 
-    # Output rate [Hz]. tracked_pose arrives at ~200 Hz; 50 is plenty for a
-    # controller and lighter on the bus. Set 0.0 to publish on every pose.
     publish_rate: 50.0
 
-    # Cartographer pose-graph optimization may correct the map pose by more
-    # than one metre in a single frame on this compact, repetitive track.
-    # Reject physically impossible frame-to-frame motion and blend the map
-    # correction in gradually so MPPI never receives a state teleport.
+    # Publish odom -> base_link from pure dead reckoning.
+    #
+    # FALSE for the Cartographer stack: Cartographer already owns that edge
+    #   (provide_odom_frame = true). Two publishers on one edge is a broken
+    #   TF tree with no error message, just erratic lookups.
+    # TRUE for the AMCL stack: AMCL owns map -> odom and needs someone else to
+    #   supply odom -> base_link. That someone is this node.
+    publish_odom_tf: false
+
+    ############################################################
+    # Pose gate
+    #
+    # Replaces the old suppress-then-slew logic. The previous code discarded an
+    # implausible increment and then slewed onto the same jumped pose anyway at
+    # correction_linear_rate, so a 0.6 m flip still landed over ~1.7 s. It now
+    # coasts on dead reckoning instead and only accepts a correction that
+    # survives hold_timeout.
+    ############################################################
+
     filter_pose_jumps: true
-    pose_step_slack: 0.05
-    max_pose_step_speed: 3.0
-    yaw_step_slack: 0.10
-    max_yaw_step_rate: 3.0
-    correction_linear_rate: 0.35
-    correction_angular_rate: 0.60
-    max_filter_dt: 0.10
+
+    # Reject a map pose disagreeing with dead reckoning by more than this.
+    # Observed flips were 0.585 m and 0.618 m; legitimate corrections between
+    # 200 Hz updates are well under 0.1 m. 0.25 m sits between the two.
+    max_innovation: 0.25          # [m]
+    max_yaw_innovation: 0.15      # [rad]
+
+    # Slew rates while tracking normally.
+    correction_linear_rate: 0.35   # [m/s]
+    correction_angular_rate: 0.60  # [rad/s]
+
+    # Slew rates once a correction has been confirmed.
+    reacquire_linear_rate: 1.50    # [m/s]
+    reacquire_angular_rate: 1.50   # [rad/s]
+
+    # How long a coherent offset must persist before it is accepted. Dead
+    # reckoning is measured good to ~0.15 m over 5 s (2% ERPM scale error plus
+    # the residual gyro bias), so this is a cheap window. Lower it if you would
+    # rather re-acquire quickly than coast; raise it if you would rather coast.
+    hold_timeout: 5.0             # [s]
+
+    # While holding, the offset must stay this stable to count as the same
+    # correction. A wandering offset restarts the timer.
+    consistency_tol: 0.15         # [m]
+
+    max_filter_dt: 0.10           # [s]
+
+    ############################################################
+    # IMU / dead reckoning
+    ############################################################
+
+    # +1.0 verified on this vehicle: rotating the car counter-clockwise by hand
+    # produced positive angular_velocity.z, which is REP-103 compliant.
+    gyro_z_sign: 1.0
+
+    # Measured stationary bias on this IMU: ~0.00103 rad/s (3.5 deg/min), which
+    # accounts for the ~4.4 deg of accumulated map->odom yaw correction over the
+    # 169 s bag. Estimated online whenever the wheels report stopped.
+    estimate_gyro_bias: true
+    gyro_bias_alpha: 0.002
+    stationary_speed: 0.05        # [m/s]
+    max_gyro_bias: 0.05           # [rad/s] sanity clamp
+
+    prefer_gyro_yaw_rate: true
 
     ############################################################
     # Speed from motor RPM
     ############################################################
 
     # v = erpm * erpm_to_speed_gain
-    #
-    # Leave erpm_to_speed_gain at 0.0 to compute it from the physical values
-    # below:
+    # Leave at 0.0 to compute from the physical values:
     #   gain = 2*pi*wheel_radius / (60 * pole_pairs * gear_ratio)
-    #
-    # pole_pairs = 3 is inferred from the old distance_scale of 1/505; verify
-    # it with the calibration procedure (see log_calibration).
     erpm_to_speed_gain: 6.145e-4
     wheel_radius: 0.05017
     gear_ratio: 8.55
     pole_pairs: 1.0
 
-    ############################################################
-    # Fusion with tracked_pose derivative
-    ############################################################
-
-    # Published speed magnitude:
-    #   (1 - pose_weight)*|v_rpm| + pose_weight*|v_pose_lp|
-    # pose_weight only *softens* an RPM scale error, it cannot cancel it, and
-    # it trades in pose noise. Calibrate the gain instead of leaning on this.
-    # Signed ERPM is calibrated and much less sensitive to scan-matching pose
-    # corrections. Keep pose derivatives out of the speed magnitude on-car.
+    # Keep pose derivatives out of the speed magnitude. Now that the gate can
+    # reject a jump, contaminating speed with pose derivatives would reintroduce
+    # the coupling the gate exists to remove.
     pose_weight: 0.0
 
-    # Low-pass factors in [0,1]. Larger = more responsive but noisier.
     pose_speed_alpha: 0.15
     yaw_rate_alpha: 0.15
-
-    # Used only as a direction fallback when signed VESC RPM is unavailable.
     direction_threshold: 0.15
-
-    # Suppress stationary Cartographer/RPM jitter. This also clears a stale
-    # reverse direction before the next forward launch.
     speed_deadband: 0.02
-
-    # Ignore pose pairs further apart than this [s].
     max_pose_dt: 0.5
 
     ############################################################
     # Calibration and covariance
     ############################################################
 
-    # When true, logs rpm_speed, pose_speed, and their ratio. Drive a steady
-    # speed and multiply gain (or pole_pairs) by the reported ratio so RPM
-    # matches the pose-derived speed.
+    # Logs rpm_speed, pose_speed, their ratio, and the live gyro bias estimate.
     log_calibration: false
 
     position_variance: 0.0025   # (0.05 m)^2
     yaw_variance: 0.0025
     speed_variance: 0.04        # (0.2 m/s)^2
+
+    # Reported instead of the above while the gate is coasting, so downstream
+    # consumers can see the pose is not currently anchored to the map.
+    untrusted_position_variance: 1.0
+    untrusted_yaw_variance: 0.25

@@ -230,6 +230,34 @@ TEST(DistanceField, VehicleFootprintClearanceCoversTheWholeBody)
   EXPECT_TRUE(std::isinf(vehicleFootprintClearance(State{}, vehicle, nullptr)));
 }
 
+TEST(Recovery, AllowsRecordedGridQuantizationWhileRequiringAClearEndpoint)
+{
+  // 0822_A3_01 started 8.3-12.4 cm inside the inflated envelope. The
+  // clearance generally improved while reversing, with one harmless 17.5 mm
+  // regression at a 5 cm grid-cell boundary, and ended well outside it.
+  const std::vector<double> recorded_like{
+    -0.124, -0.101, -0.0835, -0.101, -0.060, -0.010, 0.040, 0.176};
+  EXPECT_TRUE(reverseRecoveryClearanceSafe(recorded_like, 0.13, 0.025));
+
+  // These are the two independent causes of all recorded rejections.
+  EXPECT_FALSE(reverseRecoveryClearanceSafe(recorded_like, 0.08, 0.025));
+  EXPECT_FALSE(reverseRecoveryClearanceSafe(recorded_like, 0.13, 0.005));
+}
+
+TEST(Recovery, StillRejectsBlockedOrNonEscapingReversePaths)
+{
+  EXPECT_FALSE(reverseRecoveryClearanceSafe({}, 0.13, 0.025));
+  EXPECT_FALSE(reverseRecoveryClearanceSafe(
+      {-0.10, -0.12, -0.15, -0.18}, 0.13, 0.025));
+  EXPECT_FALSE(reverseRecoveryClearanceSafe(
+      {-0.10, -0.05, -0.01}, 0.13, 0.025));
+  EXPECT_FALSE(reverseRecoveryClearanceSafe(
+      {-0.10, 0.02, -0.01, 0.10}, 0.13, 0.025));
+  EXPECT_FALSE(reverseRecoveryClearanceSafe(
+      {-0.10, std::numeric_limits<double>::quiet_NaN(), 0.10},
+      0.13, 0.025));
+}
+
 TEST(Cost, BoundaryViolationAndCbfArePenalized)
 {
   const RaceLine track = makeCircle(false, 0.45);

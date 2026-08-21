@@ -101,13 +101,23 @@ mppi_controller:
       # random rollouts never reverse; only RECOVERY may command this speed.
       # First command zero speed and zero steering, then reverse in a straight
       # line along the vehicle's current longitudinal tangent.
-      reverse_speed: 0.25
+      # 0.25 m/s could not overcome drivetrain/static friction on the real car.
+      # 0.40 m/s remains a short, straight recovery rather than a fast reverse.
+      reverse_speed: 0.40
       reverse_distance: 0.40
       reverse_sample_step: 0.025
       entry_stop_time: 0.30
-      # Permit a small scan/grid envelope violation only when every reverse
-      # sample improves clearance and the endpoint restores the hard margin.
-      initial_clearance_tolerance: 0.08
+      # 0822_A3_01: all 163 rejected automatic reverse attempts started only
+      # 0.083-0.124 m inside the inflated envelope and ended with 0.176-0.226 m
+      # positive clearance after 0.4 m. The old 0.08 m threshold rejected even
+      # the best case by 3 mm. Rear-corridor safety is checked independently by
+      # the state machine, so this tolerance only permits escaping a front
+      # contact; the endpoint must still restore the complete hard margin.
+      initial_clearance_tolerance: 0.13
+      # Allow sub-cell clearance quantization while still rejecting a path
+      # whose safety margin materially worsens. Observed maximum was 17.5 mm
+      # on the 5 cm grid.
+      clearance_regression_tolerance: 0.025
 
     cuda:
       # Preallocated once during lifecycle configure (4M float cells = 16 MiB).

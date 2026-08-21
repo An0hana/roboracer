@@ -85,7 +85,7 @@ public:
     config.min_command_speed = declare_parameter<double>("min_command_speed", 0.0);
     config.max_command_speed = declare_parameter<double>("max_command_speed", 2.0);
     config.recovery_min_command_speed = declare_parameter<double>(
-      "recovery_min_command_speed", -0.30);
+      "recovery_min_command_speed", -0.45);
     config.recovery_state_timeout = declare_parameter<double>(
       "recovery_state_timeout", 0.150);
     config.min_command_steering = declare_parameter<double>(
