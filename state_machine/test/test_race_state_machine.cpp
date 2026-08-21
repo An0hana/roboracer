@@ -21,6 +21,7 @@ StateMachineConfig config()
   value.return_blend_duration = 1.0;
   value.stuck_confirmation = 0.30;
   value.recovery_reverse_distance = 0.10;
+  value.recovery_minimum_success_distance = 0.08;
   value.recovery_max_reverse_time = 1.0;
   value.recovery_settle_confirmation = 0.10;
   value.recovery_cooldown = 0.50;
@@ -247,6 +248,43 @@ TEST(RaceStateMachine, RecoversFromZeroSpeedBrakingFallbackWhileRacing)
   EXPECT_EQ(result.reason, "vehicle_stuck");
 }
 
+TEST(RaceStateMachine, DoesNotClaimSuccessAfterAReverseTimeoutWithoutProgress)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+  observation.command_available = true;
+  observation.commanded_speed = 0.40;
+  observation.ego_speed = 0.0;
+  observation.reverse_path_clear = true;
+
+  auto result = runFor(machine, observation, 0.40);
+  ASSERT_EQ(result.behavior_state, BehaviorState::RECOVERY);
+  result = runFor(machine, observation, 1.10);
+  EXPECT_TRUE(result.stop_requested);
+  EXPECT_EQ(result.safety_state, SafetyState::STOP);
+  EXPECT_EQ(result.reason, "recovery_insufficient_progress");
+}
+
+TEST(RaceStateMachine, StopsIfRearPathBlocksBeforeUsefulProgress)
+{
+  RaceStateMachine machine(config());
+  StateObservation observation;
+  enterReady(machine, observation);
+  observation.command_available = true;
+  observation.commanded_speed = 0.40;
+  observation.ego_speed = 0.0;
+  observation.reverse_path_clear = true;
+
+  auto result = runFor(machine, observation, 0.40);
+  ASSERT_EQ(result.behavior_state, BehaviorState::RECOVERY);
+  observation.reverse_path_clear = false;
+  result = runFor(machine, observation, 0.05);
+  EXPECT_TRUE(result.stop_requested);
+  EXPECT_EQ(result.safety_state, SafetyState::STOP);
+  EXPECT_EQ(result.reason, "recovery_reverse_blocked");
+}
+
 TEST(RaceStateMachine, DoesNotReverseIntoABlockedRearCorridor)
 {
   RaceStateMachine machine(config());
@@ -300,6 +338,10 @@ TEST(RaceStateMachine, RejectsInvalidInputAndConfiguration)
   EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
   invalid = config();
   invalid.recovery_reverse_distance = 0.0;
+  EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
+  invalid = config();
+  invalid.recovery_minimum_success_distance =
+    invalid.recovery_reverse_distance + 0.01;
   EXPECT_THROW(RaceStateMachine machine(invalid), std::invalid_argument);
 
   RaceStateMachine machine(config());

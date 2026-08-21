@@ -258,6 +258,41 @@ TEST(Recovery, StillRejectsBlockedOrNonEscapingReversePaths)
       0.13, 0.025));
 }
 
+TEST(Recovery, UsesABoundedKickUntilReverseMotionIsEstablished)
+{
+  EXPECT_DOUBLE_EQ(
+    reverseRecoveryTargetSpeed(0.20, 0.0, 0.30, 0.50, 1.00, 0.80, 0.15),
+    0.0);
+  EXPECT_DOUBLE_EQ(
+    reverseRecoveryTargetSpeed(0.31, 0.0, 0.30, 0.50, 1.00, 0.80, 0.15),
+    -1.00);
+  EXPECT_DOUBLE_EQ(
+    reverseRecoveryTargetSpeed(0.50, -0.20, 0.30, 0.50, 1.00, 0.80, 0.15),
+    -0.50);
+  EXPECT_DOUBLE_EQ(
+    reverseRecoveryTargetSpeed(1.20, 0.0, 0.30, 0.50, 1.00, 0.80, 0.15),
+    -0.50);
+}
+
+TEST(Recovery, SolverFailureVelocitySetpointDeceleratesWithoutAnUpwardStep)
+{
+  EXPECT_NEAR(
+    solverFailureDeceleratedSpeed(2.0, 1.8, 1.5, 0.05, 1.5, 3.0),
+    1.725, 1.0e-12);
+  EXPECT_DOUBLE_EQ(
+    solverFailureDeceleratedSpeed(1.52, 1.52, 1.5, 0.05, 1.5, 3.0),
+    1.5);
+  EXPECT_DOUBLE_EQ(
+    solverFailureDeceleratedSpeed(1.2, 1.2, 1.5, 0.05, 1.5, 3.0),
+    1.2);
+  EXPECT_DOUBLE_EQ(
+    solverFailureDeceleratedSpeed(1.5, -0.2, 1.5, 0.05, 1.5, 3.0),
+    0.0);
+  EXPECT_DOUBLE_EQ(
+    solverFailureDeceleratedSpeed(1.5, 1.5, 0.0, 0.05, 1.5, 3.0),
+    0.0);
+}
+
 TEST(Cost, BoundaryViolationAndCbfArePenalized)
 {
   const RaceLine track = makeCircle(false, 0.45);

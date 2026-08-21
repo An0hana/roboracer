@@ -1234,6 +1234,62 @@ bool reverseRecoveryClearanceSafe(
   return previous >= 0.0;
 }
 
+double reverseRecoveryTargetSpeed(
+  double behavior_elapsed,
+  double measured_speed,
+  double entry_stop_time,
+  double reverse_speed,
+  double kick_speed,
+  double kick_duration,
+  double kick_release_speed)
+{
+  const std::array<double, 7> values{{
+    behavior_elapsed, measured_speed, entry_stop_time, reverse_speed,
+    kick_speed, kick_duration, kick_release_speed}};
+  if (!std::all_of(
+      values.begin(), values.end(),
+      [](double value) {return std::isfinite(value);}) ||
+    entry_stop_time < 0.0 || reverse_speed <= 0.0 || kick_speed < reverse_speed ||
+    kick_duration < 0.0 || kick_release_speed < 0.0)
+  {
+    return 0.0;
+  }
+  if (behavior_elapsed < entry_stop_time) {
+    return 0.0;
+  }
+  const double reverse_elapsed = behavior_elapsed - entry_stop_time;
+  const bool launch_needed = measured_speed > -kick_release_speed;
+  if (launch_needed && reverse_elapsed < kick_duration) {
+    return -kick_speed;
+  }
+  return -reverse_speed;
+}
+
+double solverFailureDeceleratedSpeed(
+  double last_commanded_speed,
+  double measured_speed,
+  double deceleration,
+  double dt,
+  double floor_speed,
+  double max_speed) noexcept
+{
+  if (!finite(floor_speed) || floor_speed < 0.0 || !finite(max_speed) ||
+    floor_speed > max_speed ||
+    !finite(deceleration) || deceleration <= 0.0 || !finite(dt) || dt <= 0.0)
+  {
+    return 0.0;
+  }
+  const double bounded_command = finite(last_commanded_speed) ?
+    std::clamp(last_commanded_speed, 0.0, max_speed) : 0.0;
+  const double bounded_measurement = finite(measured_speed) ?
+    std::clamp(measured_speed, 0.0, max_speed) : 0.0;
+  const double starting_speed = std::min(bounded_command, bounded_measurement);
+  if (starting_speed <= floor_speed) {
+    return starting_speed;
+  }
+  return std::max(floor_speed, starting_speed - deceleration * dt);
+}
+
 bool CpuMppiBackend::stateSafe(
   const State & state, const RaceLine & race_line,
   const DistanceField * distance_field,

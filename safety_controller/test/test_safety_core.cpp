@@ -598,6 +598,58 @@ TEST(SafetyCore, ReverseRequiresFreshRecoveryAuthorization)
   EXPECT_FALSE(result.recovery_reverse_authorized);
 }
 
+TEST(SafetyCore, AuthorizedReverseEscapesAFrontContact)
+{
+  SafetyCore core(immediateAebConfig());
+  core.updateState(0.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(0.35, 0.0), 1.0);
+  core.updateRecoveryAuthorization(true, 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-1.0, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_TRUE(result.recovery_reverse_authorized);
+  EXPECT_TRUE(result.aeb_reverse_escape_active);
+  EXPECT_FALSE(result.aeb.emergency);
+  EXPECT_GT(result.aeb.reverse_escape_filtered_beams, 0U);
+  EXPECT_EQ(result.stop_reason, StopReason::kNone);
+  EXPECT_DOUBLE_EQ(result.command.speed, -1.0);
+}
+
+TEST(SafetyCore, AuthorizedReverseStillStopsForARearObstacle)
+{
+  SafetyCore core(immediateAebConfig());
+  core.updateState(0.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(-0.20, 0.0), 1.0);
+  core.updateRecoveryAuthorization(true, 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-1.0, 0.0}, 1.0);
+
+  const ArbitrationResult result = core.evaluate(1.01);
+  EXPECT_TRUE(result.aeb_reverse_escape_active);
+  EXPECT_TRUE(result.aeb.emergency);
+  EXPECT_EQ(result.stop_reason, StopReason::kAeb);
+  EXPECT_DOUBLE_EQ(result.command.speed, 0.0);
+}
+
+TEST(SafetyCore, ForwardAebLatchCanReleaseIntoAClearAuthorizedReverse)
+{
+  SafetyCore core(immediateAebConfig());
+  core.updateState(0.0, 0.0, 1.0);
+  core.updateScan(singlePointScan(0.35, 0.0), 1.0);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{0.5, 0.0}, 1.0);
+  ASSERT_EQ(core.evaluate(1.01).stop_reason, StopReason::kAeb);
+
+  core.updateState(0.0, 0.0, 1.02);
+  core.updateScan(singlePointScan(0.35, 0.0), 1.02);
+  core.updateRecoveryAuthorization(true, 1.02);
+  core.updateCommand(ControllerMode::kMppi, DriveCommand{-1.0, 0.0}, 1.02);
+  const ArbitrationResult result = core.evaluate(1.03);
+  EXPECT_FALSE(result.aeb.emergency);
+  EXPECT_FALSE(result.aeb_latched);
+  EXPECT_FALSE(result.aeb_resume_active);
+  EXPECT_EQ(result.stop_reason, StopReason::kNone);
+  EXPECT_DOUBLE_EQ(result.command.speed, -1.0);
+}
+
 TEST(SafetyCore, RecoveryAuthorizationNeverAllowsFtgReverse)
 {
   SafetyCore core(SafetyConfig{}, ControllerMode::kFtg);

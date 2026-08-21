@@ -85,7 +85,7 @@ public:
     config.min_command_speed = declare_parameter<double>("min_command_speed", 0.0);
     config.max_command_speed = declare_parameter<double>("max_command_speed", 2.0);
     config.recovery_min_command_speed = declare_parameter<double>(
-      "recovery_min_command_speed", -0.45);
+      "recovery_min_command_speed", -1.55);
     config.recovery_state_timeout = declare_parameter<double>(
       "recovery_state_timeout", 0.150);
     config.min_command_steering = declare_parameter<double>(
@@ -344,6 +344,10 @@ private:
         result.recovery_reverse_authorized ? "true" : "false"));
     status.values.push_back(
       diagnosticValue(
+        "aeb_reverse_escape_active",
+        result.aeb_reverse_escape_active ? "true" : "false"));
+    status.values.push_back(
+      diagnosticValue(
         "active_min_command_speed_mps",
         std::to_string(result.active_min_command_speed)));
     status.values.push_back(
@@ -380,6 +384,10 @@ private:
     status.values.push_back(
       diagnosticValue(
         "aeb_self_filtered_beams", std::to_string(result.aeb.self_filtered_beams)));
+    status.values.push_back(
+      diagnosticValue(
+        "aeb_reverse_escape_filtered_beams",
+        std::to_string(result.aeb.reverse_escape_filtered_beams)));
     status.values.push_back(
       diagnosticValue(
         "max_lateral_intrusion_m",

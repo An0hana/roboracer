@@ -124,6 +124,9 @@ private:
     declare_parameter<double>("recovery.overspeed_command_reduction", 0.10);
     declare_parameter<double>("recovery.overspeed_proportional_gain", 0.50);
     declare_parameter<double>("recovery.overspeed_command_deceleration", 1.50);
+    declare_parameter<double>("recovery.solver_failure_deceleration", 1.50);
+    declare_parameter<double>("recovery.solver_failure_min_speed", 1.50);
+    declare_parameter<double>("recovery.cached_control_max_age", 0.10);
     declare_parameter<bool>("require_costmap", true);
     declare_parameter<int>("occupied_threshold", 50);
     declare_parameter<bool>("unknown_is_occupied", false);
@@ -151,11 +154,14 @@ private:
     declare_parameter<double>("recovery.stuck_minimum_clearance", 0.05);
     declare_parameter<double>("recovery.stuck_timeout", 1.50);
     declare_parameter<double>("recovery.stuck_cooldown", 2.00);
-    declare_parameter<double>("recovery.reverse_speed", 0.40);
-    declare_parameter<double>("recovery.reverse_distance", 0.40);
+    declare_parameter<double>("recovery.reverse_speed", 1.00);
+    declare_parameter<double>("recovery.kick_speed", 1.50);
+    declare_parameter<double>("recovery.kick_duration", 0.90);
+    declare_parameter<double>("recovery.kick_release_speed", 0.30);
+    declare_parameter<double>("recovery.reverse_distance", 0.50);
     declare_parameter<double>("recovery.reverse_sample_step", 0.025);
     declare_parameter<double>("recovery.entry_stop_time", 0.30);
-    declare_parameter<double>("recovery.initial_clearance_tolerance", 0.13);
+    declare_parameter<double>("recovery.initial_clearance_tolerance", 0.25);
     declare_parameter<double>("recovery.clearance_regression_tolerance", 0.025);
     declare_parameter<int>("mppi.random_seed", 7);
     declare_parameter<int>("mppi.nearest_search_radius", 80);
@@ -396,6 +402,12 @@ private:
       overspeed_config.command_deceleration =
         parameter<double>("recovery.overspeed_command_deceleration");
       overspeed_recovery_ = OverspeedRecovery(overspeed_config);
+      solver_failure_deceleration_ =
+        parameter<double>("recovery.solver_failure_deceleration");
+      solver_failure_min_speed_ =
+        parameter<double>("recovery.solver_failure_min_speed");
+      cached_control_max_age_ =
+        parameter<double>("recovery.cached_control_max_age");
       require_costmap_ = parameter<bool>("require_costmap");
       occupied_threshold_ = parameter<int>("occupied_threshold");
       unknown_is_occupied_ = parameter<bool>("unknown_is_occupied");
@@ -427,6 +439,10 @@ private:
       stuck_timeout_ = parameter<double>("recovery.stuck_timeout");
       stuck_cooldown_ = parameter<double>("recovery.stuck_cooldown");
       recovery_reverse_speed_ = parameter<double>("recovery.reverse_speed");
+      recovery_kick_speed_ = parameter<double>("recovery.kick_speed");
+      recovery_kick_duration_ = parameter<double>("recovery.kick_duration");
+      recovery_kick_release_speed_ =
+        parameter<double>("recovery.kick_release_speed");
       recovery_reverse_distance_ = parameter<double>("recovery.reverse_distance");
       recovery_reverse_sample_step_ =
         parameter<double>("recovery.reverse_sample_step");
@@ -441,6 +457,10 @@ private:
         !positive(localization_position_jump_threshold_) ||
         !positive(localization_yaw_jump_threshold_) || !positive(localization_jump_hold_time_) ||
         !std::isfinite(measured_speed_tolerance_) || measured_speed_tolerance_ < 0.0 ||
+        !positive(solver_failure_deceleration_) ||
+        !std::isfinite(solver_failure_min_speed_) || solver_failure_min_speed_ < 0.0 ||
+        solver_failure_min_speed_ > vehicle_.max_speed ||
+        !positive(cached_control_max_age_) ||
         !positive(near_obstacle_distance_) ||
         !std::isfinite(near_obstacle_exploration_scale_) ||
         near_obstacle_exploration_scale_ < 1.0 ||
@@ -449,7 +469,12 @@ private:
         stuck_speed_scale_threshold_ < 0.0 || stuck_speed_scale_threshold_ > 1.0 ||
         !std::isfinite(stuck_minimum_clearance_) || stuck_minimum_clearance_ < 0.0 ||
         !positive(stuck_timeout_) || !positive(stuck_cooldown_) ||
-        !positive(recovery_reverse_speed_) || recovery_reverse_speed_ > 1.0 ||
+        !positive(recovery_reverse_speed_) || recovery_reverse_speed_ > 2.0 ||
+        !positive(recovery_kick_speed_) || recovery_kick_speed_ > 2.0 ||
+        recovery_kick_speed_ < recovery_reverse_speed_ ||
+        !std::isfinite(recovery_kick_duration_) || recovery_kick_duration_ < 0.0 ||
+        !std::isfinite(recovery_kick_release_speed_) ||
+        recovery_kick_release_speed_ < 0.0 ||
         !positive(recovery_reverse_distance_) ||
         !positive(recovery_reverse_sample_step_) ||
         recovery_reverse_sample_step_ > recovery_reverse_distance_ ||
@@ -468,6 +493,7 @@ private:
         return false;
       }
       backend_ = makeBackend(requested_backend_, mppi_, vehicle_);
+      recovery_validator_.configure(mppi_, vehicle_);
     } catch (const std::exception & exception) {
       error = exception.what();
       return false;
@@ -499,6 +525,7 @@ private:
       return CallbackReturn::FAILURE;
     }
     backend_->reset();
+    clearCachedTrajectory();
     last_commanded_speed_ = 0.0;
     last_commanded_steering_ = 0.0;
     last_commanded_steering_atomic_.store(0.0);
@@ -536,6 +563,7 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     last_solver_failure_time_.reset();
+    clearCachedTrajectory();
     recovery_behavior_active_ = false;
     recovery_behavior_enter_time_.reset();
     RCLCPP_INFO(
@@ -562,6 +590,7 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     last_solver_failure_time_.reset();
+    clearCachedTrajectory();
     recovery_behavior_active_ = false;
     recovery_behavior_enter_time_.reset();
     last_commanded_speed_ = 0.0;
@@ -609,6 +638,7 @@ private:
     stuck_since_.reset();
     last_stuck_recovery_time_.reset();
     last_solver_failure_time_.reset();
+    clearCachedTrajectory();
     recovery_behavior_active_ = false;
     recovery_behavior_enter_time_.reset();
     {
@@ -872,22 +902,24 @@ private:
     latest_race_state_ = std::move(timed);
   }
 
-  std::vector<State> reverseRecoveryPath(const State & initial_state) const
+  std::vector<State> reverseRecoveryPath(
+    const State & initial_state, double reverse_speed,
+    double reverse_distance) const
   {
     VehicleConfig reverse_vehicle = vehicle_;
-    reverse_vehicle.min_speed = -recovery_reverse_speed_;
+    reverse_vehicle.min_speed = -reverse_speed;
     BicycleModel reverse_model(reverse_vehicle);
     State state = initial_state;
-    state.speed = -recovery_reverse_speed_;
+    state.speed = -reverse_speed;
     // Recovery first centres the front wheels while stationary.  Model the
     // subsequent escape as a straight reverse along the vehicle's current
     // longitudinal tangent instead of extending the steering angle that put
     // the vehicle against the wall.
     state.steering_command = 0.0;
     state.steering = 0.0;
-    const double dt = recovery_reverse_sample_step_ / recovery_reverse_speed_;
+    const double dt = recovery_reverse_sample_step_ / reverse_speed;
     const std::size_t sample_count = static_cast<std::size_t>(
-      std::ceil(recovery_reverse_distance_ / recovery_reverse_sample_step_));
+      std::ceil(reverse_distance / recovery_reverse_sample_step_));
     std::vector<State> path;
     path.reserve(sample_count + 1U);
     path.push_back(state);
@@ -900,7 +932,7 @@ private:
 
   bool reverseRecoveryPathSafe(
     const std::vector<State> & path, const DistanceField * distance_field,
-    const std::vector<Obstacle> * obstacles) const
+    const std::vector<Obstacle> * obstacles, double reverse_speed) const
   {
     if (path.empty()) {
       return false;
@@ -913,7 +945,7 @@ private:
       };
     std::vector<double> margins;
     margins.reserve(path.size());
-    const double dt = recovery_reverse_sample_step_ / recovery_reverse_speed_;
+    const double dt = recovery_reverse_sample_step_ / reverse_speed;
     for (std::size_t index = 0U; index < path.size(); ++index) {
       margins.push_back(
         margin(path[index], dt * static_cast<double>(index)));
@@ -930,6 +962,8 @@ private:
     if (!recovery_behavior_active_) {
       recovery_behavior_active_ = true;
       recovery_behavior_enter_time_ = tick_time;
+      recovery_reverse_progress_ = 0.0;
+      recovery_progress_update_time_ = tick_time;
       safeResetBackend();
       last_commanded_speed_ = 0.0;
       last_applied_control_ = Control{};
@@ -937,20 +971,46 @@ private:
 
     const double elapsed = recovery_behavior_enter_time_.has_value() ?
       std::max(0.0, (tick_time - *recovery_behavior_enter_time_).seconds()) : 0.0;
+    if (recovery_progress_update_time_.has_value()) {
+      const double progress_dt = std::clamp(
+        (tick_time - *recovery_progress_update_time_).seconds(), 0.0,
+        2.0 / control_frequency_);
+      recovery_reverse_progress_ = std::min(
+        recovery_reverse_distance_, recovery_reverse_progress_ +
+        std::max(0.0, -request.initial_state.speed) * progress_dt);
+    }
+    recovery_progress_update_time_ = tick_time;
     double target_speed = 0.0;
     std::string reason = "recovery_settle";
     std::vector<State> path;
     if (active_recovery_phase_ ==
       roboracer_msgs::msg::RaceState::RECOVERY_PHASE_REVERSE)
     {
-      if (elapsed < recovery_entry_stop_time_) {
+      target_speed = reverseRecoveryTargetSpeed(
+        elapsed, request.initial_state.speed, recovery_entry_stop_time_,
+        recovery_reverse_speed_, recovery_kick_speed_, recovery_kick_duration_,
+        recovery_kick_release_speed_);
+      if (target_speed >= 0.0) {
+        target_speed = 0.0;
         reason = "recovery_center_steering";
       } else {
-        path = reverseRecoveryPath(request.initial_state);
-        if (reverseRecoveryPathSafe(path, request.distance_field, &obstacles)) {
-          target_speed = -recovery_reverse_speed_;
-          reason = "recovery_reverse";
+        const double reverse_speed = std::abs(target_speed);
+        // Validate only the distance still required in this recovery. The old
+        // code planned the full distance again on every control tick, so after
+        // moving 0.2 m it demanded another 0.4 m of rear clearance and could
+        // chatter between safe and unsafe on adjacent costmap frames.
+        const double remaining_distance = std::max(
+          recovery_reverse_sample_step_,
+          recovery_reverse_distance_ - recovery_reverse_progress_);
+        path = reverseRecoveryPath(
+          request.initial_state, reverse_speed, remaining_distance);
+        if (reverseRecoveryPathSafe(
+            path, request.distance_field, &obstacles, reverse_speed))
+        {
+          reason = reverse_speed > recovery_reverse_speed_ + 1.0e-6 ?
+            "recovery_reverse_kick" : "recovery_reverse";
         } else {
+          target_speed = 0.0;
           reason = "recovery_reverse_unsafe";
         }
       }
@@ -986,6 +1046,54 @@ private:
     last_applied_control_ = control;
     last_command_time_ = tick_time;
     last_output_time_ = tick_time;
+  }
+
+  void clearCachedTrajectory() noexcept
+  {
+    last_valid_control_sequence_.clear();
+    last_valid_trajectory_time_.reset();
+  }
+
+  bool cachedControlForSingleFailure(
+    const MppiRequest & request, const rclcpp::Time & tick_time,
+    double command_dt, Control & control, State & commanded_state,
+    std::vector<State> & near_states)
+  {
+    if (!last_valid_trajectory_time_.has_value() ||
+      last_valid_control_sequence_.size() < 2U ||
+      request.race_line == nullptr || !request.race_line->valid() ||
+      !stateWithinLimits(request.initial_state, vehicle_))
+    {
+      return false;
+    }
+    const double cache_age = (tick_time - *last_valid_trajectory_time_).seconds();
+    if (!std::isfinite(cache_age) || cache_age < 0.0 ||
+      cache_age > cached_control_max_age_)
+    {
+      return false;
+    }
+
+    const std::vector<Control> shifted(
+      last_valid_control_sequence_.begin() + 1,
+      last_valid_control_sequence_.end());
+    const std::size_t near_count = std::min(
+      shifted.size(), std::max<std::size_t>(1U, mppi_.repair_steps));
+    const std::vector<Control> near_controls(
+      shifted.begin(), shifted.begin() + static_cast<std::ptrdiff_t>(near_count));
+    const CostBreakdown near_cost = recovery_validator_.evaluateTrajectory(
+      request.initial_state, near_controls, *request.race_line,
+      request.distance_field, &near_states, request.obstacles, &request.behavior);
+    if (!std::isfinite(near_cost.total()) || near_cost.collision > 0.0) {
+      near_states.clear();
+      return false;
+    }
+
+    control = shifted.front();
+    commanded_state = model_->step(request.initial_state, control, command_dt);
+    commanded_state.speed = std::clamp(
+      last_commanded_speed_ + control.acceleration * command_dt,
+      vehicle_.min_speed, vehicle_.max_speed);
+    return true;
   }
 
   void controlTick()
@@ -1213,6 +1321,8 @@ private:
       safeResetBackend();
       recovery_behavior_active_ = false;
       recovery_behavior_enter_time_.reset();
+      recovery_progress_update_time_.reset();
+      recovery_reverse_progress_ = 0.0;
       last_commanded_speed_ = 0.0;
       last_applied_control_ = Control{};
       last_command_time_.reset();
@@ -1234,13 +1344,13 @@ private:
     }
     if (!result.valid || result.solve_time_ms > max_solve_time_ms_) {
       const std::string reason = result.valid ? "solve_timeout" : result.reason;
-      if (!last_solver_failure_time_.has_value()) {
+      const bool single_failure = !last_solver_failure_time_.has_value();
+      if (single_failure) {
         last_solver_failure_time_ = tick_time;
       }
       const double failure_duration =
         (tick_time - *last_solver_failure_time_).seconds();
 
-      constexpr double kRecoveryMaxSpeed = 1.5;
       constexpr double kAebResetDuration = 0.5;
       if (failure_duration > kAebResetDuration &&
           request.initial_state.speed < 0.10) {
@@ -1249,55 +1359,73 @@ private:
 
       {
         State recovery_state = request.initial_state;
-        double recovery_steering_rate = 0.0;
-        if (race_line_.has_value() && race_line_->valid()) {
-          const TrackProjection proj = race_line_->project(
-            recovery_state, std::nullopt, mppi_.nearest_search_radius);
-          const Waypoint & ref = race_line_->atWrapped(
-            static_cast<std::ptrdiff_t>(proj.index));
-          const double lat_err = proj.lateral_error;
-          const double desired_heading = normalizeAngle(
-            ref.yaw - std::atan(1.5 * lat_err));
-          const double heading_correction =
-            normalizeAngle(desired_heading - recovery_state.yaw);
-          const double lookahead =
-            std::max(0.45, 0.45 + 0.25 * recovery_state.speed);
-          const double desired_curvature =
-            ref.curvature + 2.0 * std::sin(heading_correction) / lookahead;
-          const double desired_steering = std::atan(
-            vehicle_.wheelbase * desired_curvature);
-          const double eff = steeringEffectiveness(
-            vehicle_, recovery_state.speed);
-          const double desired_command = std::clamp(
-            desired_steering / std::max(eff, 0.01),
-            vehicle_.min_steering, vehicle_.max_steering);
-          recovery_steering_rate =
-            (desired_command - recovery_state.steering_command) /
-            std::max(0.15, command_dt);
-          recovery_state.steering_command = std::clamp(
-            recovery_state.steering_command +
-            recovery_steering_rate * command_dt,
-            vehicle_.min_steering, vehicle_.max_steering);
-        } else {
-          recovery_state.steering_command = last_commanded_steering_;
+        Control recovery_control;
+        std::vector<State> recovery_path;
+        const bool used_cached_control = single_failure && cachedControlForSingleFailure(
+          request, tick_time, command_dt, recovery_control, recovery_state, recovery_path);
+        // A cached sequence may bridge only one failed cycle. A later success
+        // installs a fresh sequence; sustained failures always decelerate.
+        clearCachedTrajectory();
+
+        if (!used_cached_control) {
+          double recovery_steering_rate = 0.0;
+          if (race_line_.has_value() && race_line_->valid()) {
+            const TrackProjection proj = race_line_->project(
+              recovery_state, std::nullopt, mppi_.nearest_search_radius);
+            const Waypoint & ref = race_line_->atWrapped(
+              static_cast<std::ptrdiff_t>(proj.index));
+            const double lat_err = proj.lateral_error;
+            const double desired_heading = normalizeAngle(
+              ref.yaw - std::atan(1.5 * lat_err));
+            const double heading_correction =
+              normalizeAngle(desired_heading - recovery_state.yaw);
+            const double lookahead =
+              std::max(0.45, 0.45 + 0.25 * recovery_state.speed);
+            const double desired_curvature =
+              ref.curvature + 2.0 * std::sin(heading_correction) / lookahead;
+            const double desired_steering = std::atan(
+              vehicle_.wheelbase * desired_curvature);
+            const double eff = steeringEffectiveness(
+              vehicle_, recovery_state.speed);
+            const double desired_command = std::clamp(
+              desired_steering / std::max(eff, 0.01),
+              vehicle_.min_steering, vehicle_.max_steering);
+            recovery_steering_rate =
+              (desired_command - recovery_state.steering_command) /
+              std::max(0.15, command_dt);
+            recovery_state.steering_command = std::clamp(
+              recovery_state.steering_command +
+              recovery_steering_rate * command_dt,
+              vehicle_.min_steering, vehicle_.max_steering);
+          } else {
+            recovery_state.steering_command = last_commanded_steering_;
+          }
+          recovery_state.speed = solverFailureDeceleratedSpeed(
+            last_commanded_speed_, request.initial_state.speed,
+            solver_failure_deceleration_, command_dt,
+            solver_failure_min_speed_, vehicle_.max_speed);
+          recovery_control.steering_rate = recovery_steering_rate;
+          // The velocity setpoint is anchored to the lower of command and
+          // measurement, so its jump relative to the old setpoint is not a
+          // physical acceleration. Report the intended physical ramp instead.
+          recovery_control.acceleration =
+            request.initial_state.speed > recovery_state.speed + 1.0e-6 ?
+            std::clamp(
+              -solver_failure_deceleration_, vehicle_.min_acceleration,
+              vehicle_.max_acceleration) : 0.0;
+
+          recovery_path.reserve(mppi_.horizon_steps + 1U);
+          State predicted = recovery_state;
+          recovery_path.push_back(predicted);
+          for (std::size_t i = 0U; i < mppi_.horizon_steps; ++i) {
+            predicted = model_->step(predicted, recovery_control, mppi_.dt);
+            recovery_path.push_back(predicted);
+          }
         }
-        recovery_state.speed = kRecoveryMaxSpeed;
-        const double mppi_accel = std::isfinite(result.control.acceleration) ?
-          result.control.acceleration : 0.0;
-        Control recovery_control{recovery_steering_rate, mppi_accel};
 
         publishCommand(recovery_state, recovery_control, tick_time);
-
-        if (!result.predicted_states.empty()) {
-          publishPath(result.predicted_states, tick_time);
-        } else {
-          std::vector<State> predicted(mppi_.horizon_steps);
-          State s = recovery_state;
-          for (std::size_t i = 0U; i < mppi_.horizon_steps; ++i) {
-            s = model_->step(s, recovery_control, 0.05);
-            predicted[i] = s;
-          }
-          publishPath(predicted, tick_time);
+        if (!recovery_path.empty()) {
+          publishPath(recovery_path, tick_time);
         }
 
         publishDiagnostics(
@@ -1312,8 +1440,9 @@ private:
         last_output_time_ = tick_time;
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 1000,
-          "MPPI solver recovery creep: reason=%s speed=%.2f m/s dur=%.1f s",
-          reason.c_str(), recovery_state.speed, failure_duration);
+          "MPPI solver recovery: reason=%s mode=%s speed=%.2f m/s dur=%.1f s",
+          reason.c_str(), used_cached_control ? "cached_control" : "smooth_deceleration",
+          recovery_state.speed, failure_duration);
         return;
       }
     }
@@ -1402,10 +1531,17 @@ private:
     last_applied_control_ = applied_control;
     last_command_time_ = tick_time;
     last_output_time_ = tick_time;
+    if (result.control_sequence.size() >= 2U) {
+      last_valid_control_sequence_ = result.control_sequence;
+      last_valid_trajectory_time_ = tick_time;
+    } else {
+      clearCachedTrajectory();
+    }
   }
 
   void safeResetBackend() noexcept
   {
+    clearCachedTrajectory();
     try {
       if (backend_ != nullptr) {
         backend_->reset();
@@ -1441,6 +1577,7 @@ private:
     stopped.steering = estimated_effective_steering_atomic_.load();
     stopped.steering_command = last_commanded_steering_;
     publishCommand(stopped, Control{0.0, vehicle_.min_acceleration}, stamp);
+    clearCachedTrajectory();
     last_commanded_speed_ = 0.0;
     last_applied_control_ = Control{0.0, vehicle_.min_acceleration};
     last_output_time_ = stamp;
@@ -1572,6 +1709,8 @@ private:
     status.values.push_back(diagnosticValue(
       "recovery_stagnation_age_s", active_stuck_duration_));
     status.values.push_back(diagnosticValue(
+      "recovery_reverse_progress_m", recovery_reverse_progress_));
+    status.values.push_back(diagnosticValue(
       "race_state_age_s", active_race_state_age_));
     status.values.push_back(diagnosticValue(
       "track_confidence", active_track_confidence_));
@@ -1683,9 +1822,13 @@ private:
   double localization_yaw_jump_threshold_{0.70};
   double localization_jump_hold_time_{0.50};
   double measured_speed_tolerance_{0.15};
+  double solver_failure_deceleration_{1.50};
+  double solver_failure_min_speed_{1.50};
+  double cached_control_max_age_{0.10};
   double steering_observation_min_speed_{0.50};
   double steering_observation_gain_{0.60};
   OverspeedRecovery overspeed_recovery_{};
+  CpuMppiBackend recovery_validator_{};
   bool require_costmap_{true};
   int occupied_threshold_{50};
   bool unknown_is_occupied_{true};
@@ -1703,11 +1846,14 @@ private:
   double stuck_minimum_clearance_{0.05};
   double stuck_timeout_{1.50};
   double stuck_cooldown_{2.00};
-  double recovery_reverse_speed_{0.40};
-  double recovery_reverse_distance_{0.40};
+  double recovery_reverse_speed_{1.00};
+  double recovery_kick_speed_{1.50};
+  double recovery_kick_duration_{0.90};
+  double recovery_kick_release_speed_{0.30};
+  double recovery_reverse_distance_{0.50};
   double recovery_reverse_sample_step_{0.025};
   double recovery_entry_stop_time_{0.30};
-  double recovery_initial_clearance_tolerance_{0.13};
+  double recovery_initial_clearance_tolerance_{0.25};
   double recovery_clearance_regression_tolerance_{0.025};
   double active_recovery_speed_threshold_{
     std::numeric_limits<double>::quiet_NaN()};
@@ -1730,6 +1876,8 @@ private:
     roboracer_msgs::msg::RaceState::RECOVERY_PHASE_NONE};
   bool recovery_behavior_active_{false};
   std::optional<rclcpp::Time> recovery_behavior_enter_time_;
+  std::optional<rclcpp::Time> recovery_progress_update_time_;
+  double recovery_reverse_progress_{0.0};
 
   std::mutex data_mutex_;
   std::mutex costmap_callback_mutex_;
@@ -1743,6 +1891,8 @@ private:
   std::optional<rclcpp::Time> stuck_since_;
   std::optional<rclcpp::Time> last_stuck_recovery_time_;
   std::optional<rclcpp::Time> last_solver_failure_time_;
+  std::vector<Control> last_valid_control_sequence_;
+  std::optional<rclcpp::Time> last_valid_trajectory_time_;
   double last_commanded_speed_{0.0};
   double last_commanded_steering_{0.0};
   std::atomic<double> last_commanded_steering_atomic_{0.0};

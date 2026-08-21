@@ -281,6 +281,31 @@ struct Obstacle
   double initial_clearance_tolerance,
   double clearance_regression_tolerance);
 
+// Two-stage reverse command used to overcome the real drivetrain's static
+// friction without sustaining the launch speed for the whole maneuver.
+// Returns zero during the steering-centering interval and a negative speed
+// afterwards.
+[[nodiscard]] double reverseRecoveryTargetSpeed(
+  double behavior_elapsed,
+  double measured_speed,
+  double entry_stop_time,
+  double reverse_speed,
+  double kick_speed,
+  double kick_duration,
+  double kick_release_speed);
+
+// Returns a fail-safe velocity setpoint without introducing an upward step.
+// Deceleration starts from the lower of the previous command and the measured
+// nonnegative speed and stops at the configured floor. An already lower speed
+// remains lower instead of being raised to the floor.
+[[nodiscard]] double solverFailureDeceleratedSpeed(
+  double last_commanded_speed,
+  double measured_speed,
+  double deceleration,
+  double dt,
+  double floor_speed,
+  double max_speed) noexcept;
+
 struct CostWeights
 {
   double lateral{12.0};

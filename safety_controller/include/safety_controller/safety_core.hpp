@@ -61,7 +61,7 @@ struct SafetyConfig
   double max_command_speed{2.0};
   // Negative commands remain forbidden unless a fresh RaceState explicitly
   // authorizes the MPPI reverse-recovery phase.
-  double recovery_min_command_speed{-0.45};
+  double recovery_min_command_speed{-1.55};
   double recovery_state_timeout{0.150};
   double min_command_steering{-0.40};
   double max_command_steering{0.38};
@@ -120,6 +120,9 @@ struct AebAssessment
   bool emergency{false};
   std::size_t valid_beams{0U};
   std::size_t self_filtered_beams{0U};
+  // Present-time contacts ahead of the rear axle that are deliberately left
+  // behind by an explicitly authorized reverse recovery.
+  std::size_t reverse_escape_filtered_beams{0U};
   double maximum_lateral_intrusion{0.0};
   double collision_path_distance{std::numeric_limits<double>::infinity()};
   double sweep_distance{0.0};
@@ -137,6 +140,7 @@ struct ArbitrationResult
   double recovery_state_age{std::numeric_limits<double>::infinity()};
   double active_min_command_speed{0.0};
   bool recovery_reverse_authorized{false};
+  bool aeb_reverse_escape_active{false};
   bool aeb_latched{false};
   bool aeb_resume_active{false};
   double aeb_clear_duration{0.0};
@@ -196,7 +200,8 @@ private:
     double steering, double steering_command, double speed, double elapsed) const;
   AebAssessment assessAeb(
     double speed, double steering_command, double initial_effective_steering,
-    double extra_distance = 0.0) const;
+    double extra_distance = 0.0,
+    bool allow_reverse_front_contact_escape = false) const;
   DriveCommand stopCommand(StopReason reason) const;
   TimedCommand & commandFor(ControllerMode mode);
   const TimedCommand & commandFor(ControllerMode mode) const;

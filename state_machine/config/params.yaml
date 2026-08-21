@@ -55,8 +55,11 @@ state_machine:
     # not cause reversing. The rear swept corridor must remain clear.
     stuck_command_speed_threshold: 0.20
     stuck_speed_threshold: 0.05
-    stuck_confirmation: 1.50
-    recovery_reverse_distance: 0.40
+    # reverse_check_02 needed 1.5 s to declare a stationary failure, then each
+    # recovery moved only 0.19-0.22 m and falsely completed on its 3 s timeout.
+    stuck_confirmation: 1.00
+    recovery_reverse_distance: 0.50
+    recovery_minimum_success_distance: 0.40
     recovery_max_reverse_time: 3.0
     recovery_settle_confirmation: 0.25
     recovery_cooldown: 2.0

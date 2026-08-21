@@ -220,9 +220,11 @@ public:
     config.stuck_speed_threshold =
       declare_parameter<double>("stuck_speed_threshold", 0.05);
     config.stuck_confirmation =
-      declare_parameter<double>("stuck_confirmation", 1.50);
+      declare_parameter<double>("stuck_confirmation", 1.00);
     config.recovery_reverse_distance =
-      declare_parameter<double>("recovery_reverse_distance", 0.40);
+      declare_parameter<double>("recovery_reverse_distance", 0.50);
+    config.recovery_minimum_success_distance =
+      declare_parameter<double>("recovery_minimum_success_distance", 0.40);
     config.recovery_max_reverse_time =
       declare_parameter<double>("recovery_max_reverse_time", 3.0);
     config.recovery_settle_confirmation =
@@ -622,7 +624,7 @@ private:
   double corridor_clearance_radius_{0.24};
   double emergency_stop_distance_{0.55};
   double overtake_lateral_offset_{0.45};
-  double recovery_reverse_distance_{0.40};
+  double recovery_reverse_distance_{0.50};
   double recovery_rear_overhang_{0.124};
   double recovery_vehicle_width_{0.320};
   double recovery_safety_margin_{0.05};

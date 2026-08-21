@@ -64,8 +64,9 @@ struct StateMachineConfig
 
   double stuck_command_speed_threshold{0.20};
   double stuck_speed_threshold{0.05};
-  double stuck_confirmation{1.50};
-  double recovery_reverse_distance{0.40};
+  double stuck_confirmation{1.00};
+  double recovery_reverse_distance{0.50};
+  double recovery_minimum_success_distance{0.40};
   double recovery_max_reverse_time{3.0};
   double recovery_settle_confirmation{0.25};
   double recovery_cooldown{2.0};

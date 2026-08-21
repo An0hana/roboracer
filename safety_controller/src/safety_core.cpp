@@ -224,8 +224,19 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     selected_command.command.steering_angle,
     config_.min_command_steering, config_.max_command_steering) :
     output_steering_angle_;
+  const bool reverse_escape_requested =
+    result.recovery_reverse_authorized && selected_command.received &&
+    selected_command.command.valid() && selected_command.command.speed < 0.0;
+  result.aeb_reverse_escape_active = reverse_escape_requested;
+  // Recovery is entered only after the state machine confirms the car is
+  // nearly stationary. Use the requested negative speed here so AEB checks
+  // the rear sweep; using measured zero previously kept checking only the
+  // present full footprint and treated the front contact as inescapable.
+  const double aeb_requested_speed = reverse_escape_requested ?
+    selected_command.command.speed : current_speed_;
   result.aeb = assessAeb(
-    current_speed_, aeb_steering_target, estimated_effective_steering_angle_);
+    aeb_requested_speed, aeb_steering_target,
+    estimated_effective_steering_angle_, 0.0, reverse_escape_requested);
 
   const bool release_inputs_fresh =
     state_valid_ && scan_valid_ &&
@@ -257,6 +268,21 @@ ArbitrationResult SafetyCore::evaluate(double now_seconds)
     aeb_emergency_since_.has_value() &&
     (now_seconds - *aeb_emergency_since_) < config_.aeb_debounce_duration &&
     !aeb_latched_;
+
+  // A forward AEB latch is allowed to release directly into an independently
+  // authorized reverse when the fresh reverse sweep is clear. Without this,
+  // the old forward latch kept propulsion at zero forever even though both
+  // the state machine and MPPI had certified the rear corridor.
+  const bool authorized_reverse_clear =
+    reverse_escape_requested && release_inputs_fresh && !result.aeb.emergency;
+  if (authorized_reverse_clear) {
+    aeb_latched_ = false;
+    aeb_resume_active_ = false;
+    aeb_clear_since_.reset();
+    aeb_latch_start_.reset();
+    aeb_emergency_since_.reset();
+    aeb_resume_speed_limit_ = std::numeric_limits<double>::infinity();
+  }
 
   bool recovery_active = false;
   bool recovery_ready = false;
@@ -532,7 +558,8 @@ double SafetyCore::advanceEffectiveSteering(
 
 AebAssessment SafetyCore::assessAeb(
   double requested_speed, double steering_command,
-  double initial_effective_steering, double extra_distance) const
+  double initial_effective_steering, double extra_distance,
+  bool allow_reverse_front_contact_escape) const
 {
   AebAssessment assessment;
   assessment.scan_valid = scan_received_ && scan_valid_;
@@ -616,6 +643,21 @@ AebAssessment SafetyCore::assessAeb(
       point_y <= config_.self_filter_max_y)
     {
       ++assessment.self_filtered_beams;
+      continue;
+    }
+
+    // When a fresh RECOVERY/REVERSE state authorizes backing away, a point
+    // already overlapping the part of the vehicle ahead of the rear axle is
+    // the contact we are escaping, not a rear hazard. Ignore only that
+    // present-time front contact. Rear and rear-side points remain active,
+    // and MPPI separately requires the complete 0.4 m reverse endpoint to
+    // restore positive full-body clearance.
+    const double present_lateral_intrusion = max_abs_y - std::abs(point_y);
+    if (allow_reverse_front_contact_escape && point_x >= 0.0 &&
+      point_x <= max_x && present_lateral_intrusion + kGeometryComparisonTolerance >=
+      config_.aeb_lateral_intrusion_threshold)
+    {
+      ++assessment.reverse_escape_filtered_beams;
       continue;
     }
 

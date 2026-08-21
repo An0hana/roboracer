@@ -90,6 +90,12 @@ mppi_controller:
       overspeed_command_reduction: 0.10
       overspeed_proportional_gain: 0.50
       overspeed_command_deceleration: 1.50
+      # One fresh cached control may bridge a single failed solve after its
+      # near-term trajectory is revalidated. Sustained failures ramp down to
+      # the configured floor without ever raising an already lower speed.
+      solver_failure_deceleration: 1.50
+      solver_failure_min_speed: 1.50
+      cached_control_max_age: 0.10
       # Escape a braking-only CUDA warm-start local minimum only when the car
       # is safe, obstacle-free and odometry confirms it is nearly stationary.
       stuck_speed_threshold: 0.05
@@ -101,10 +107,15 @@ mppi_controller:
       # random rollouts never reverse; only RECOVERY may command this speed.
       # First command zero speed and zero steering, then reverse in a straight
       # line along the vehicle's current longitudinal tangent.
-      # 0.25 m/s could not overcome drivetrain/static friction on the real car.
-      # 0.40 m/s remains a short, straight recovery rather than a fast reverse.
-      reverse_speed: 0.40
-      reverse_distance: 0.40
+      # reverse_check_02 showed that -0.50 m/s cannot sustain motion: each
+      # nominal 0.40 m recovery travelled only 0.19-0.22 m and timed out.
+      # Use a short higher launch target, then keep the same -1.00 m/s target
+      # that produced reliable -0.4 to -0.6 m/s measured reverse motion.
+      reverse_speed: 1.00
+      kick_speed: 1.50
+      kick_duration: 0.90
+      kick_release_speed: 0.30
+      reverse_distance: 0.50
       reverse_sample_step: 0.025
       entry_stop_time: 0.30
       # 0822_A3_01: all 163 rejected automatic reverse attempts started only
@@ -113,7 +124,11 @@ mppi_controller:
       # the best case by 3 mm. Rear-corridor safety is checked independently by
       # the state machine, so this tolerance only permits escaping a front
       # contact; the endpoint must still restore the complete hard margin.
-      initial_clearance_tolerance: 0.13
+      # At the recorded wall contacts the 5 cm local grid reported an initial
+      # margin of -0.15 to -0.22 m although a straight 0.50 m reverse restored
+      # positive clearance monotonically. This tolerance applies only to the
+      # dedicated reverse escape; its endpoint must still be fully clear.
+      initial_clearance_tolerance: 0.25
       # Allow sub-cell clearance quantization while still rejecting a path
       # whose safety margin materially worsens. Observed maximum was 17.5 mm
       # on the 5 cm grid.

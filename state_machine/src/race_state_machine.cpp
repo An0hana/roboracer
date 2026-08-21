@@ -60,6 +60,9 @@ void validateConfig(const StateMachineConfig & config)
     !finite(config.stuck_speed_threshold) || config.stuck_speed_threshold <= 0.0 ||
     !finite(config.stuck_confirmation) || config.stuck_confirmation <= 0.0 ||
     !finite(config.recovery_reverse_distance) || config.recovery_reverse_distance <= 0.0 ||
+    !finite(config.recovery_minimum_success_distance) ||
+    config.recovery_minimum_success_distance <= 0.0 ||
+    config.recovery_minimum_success_distance > config.recovery_reverse_distance ||
     !finite(config.recovery_max_reverse_time) || config.recovery_max_reverse_time <= 0.0 ||
     !finite(config.recovery_settle_confirmation) ||
     config.recovery_settle_confirmation < 0.0 ||
@@ -192,12 +195,32 @@ StateCommand RaceStateMachine::update(const StateObservation & observation)
         recovery_distance_ >= config_.recovery_reverse_distance;
       const bool time_reached =
         observation.time - recovery_start_time_ >= config_.recovery_max_reverse_time;
-      if (!observation.reverse_path_clear || distance_reached || time_reached) {
+      if (!observation.reverse_path_clear) {
+        if (recovery_distance_ < config_.recovery_minimum_success_distance) {
+          transitionSafety(
+            SafetyState::STOP, "recovery_reverse_blocked", observation.time);
+          return command(observation.time);
+        }
         recovery_phase_ = RecoveryPhase::SETTLE;
         recovery_settle_since_.reset();
-        reason_ = !observation.reverse_path_clear ?
-          "recovery_reverse_blocked" :
-          (distance_reached ? "recovery_distance_reached" : "recovery_time_limit");
+        reason_ = "recovery_reverse_blocked_after_progress";
+      } else if (distance_reached) {
+        recovery_phase_ = RecoveryPhase::SETTLE;
+        recovery_settle_since_.reset();
+        reason_ = "recovery_distance_reached";
+      } else if (time_reached) {
+        // Never report recovery_complete after a reverse attempt that barely
+        // moved. That old transition restored normal MPPI steering, then
+        // re-entered recovery and centred it again, producing the observed
+        // steering oscillation without escaping the wall.
+        if (recovery_distance_ < config_.recovery_minimum_success_distance) {
+          transitionSafety(
+            SafetyState::STOP, "recovery_insufficient_progress", observation.time);
+          return command(observation.time);
+        }
+        recovery_phase_ = RecoveryPhase::SETTLE;
+        recovery_settle_since_.reset();
+        reason_ = "recovery_time_limit_after_progress";
       }
     }
 
