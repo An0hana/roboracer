@@ -1,9 +1,8 @@
 """Manual gamepad control node with a latching takeover.
 
-Stays silent until X is pressed on the F710. On the first press it latches
-takeover: it commands an immediate stop, then keeps publishing manual motor
-and servo commands to the mux and holds the mux locked on the manual source
-so nothing else can drive the car. Pressing X again releases control.
+The initial source is configurable. With ``initial_takeover`` enabled, manual
+control owns the car at startup and the first X press releases it to autonomy.
+Every later X press toggles between the two sources.
 
 This node does not talk to the VESC directly. It publishes to the command
 mux (manual_mux_node), which is the only node wired to the VESC command
@@ -56,6 +55,7 @@ class ManualControlNode(Node):
         self.declare_parameter("manual_motor_topic", "/manual/motor")
         self.declare_parameter("manual_servo_topic", "/manual/servo")
         self.declare_parameter("takeover_topic", "/manual/takeover")
+        self.declare_parameter("initial_takeover", True)
 
         g = self.get_parameter
         self._rate = float(g("rate").value)
@@ -78,7 +78,7 @@ class ManualControlNode(Node):
                 stale_timeout=float(g("stale_timeout").value),
             )
         )
-        self._takeover = False
+        self._takeover = bool(g("initial_takeover").value)
         self._prev_x = False
 
         # --- gamepad ------------------------------------------------------
@@ -104,15 +104,17 @@ class ManualControlNode(Node):
         self._takeover_pub = self.create_publisher(
             Bool, str(g("takeover_topic").value), latched)
 
-        # Announce the initial (released) state so the mux knows we exist.
+        # Announce the configured initial state so the mux knows we exist.
         self._publish_takeover()
 
         period = 1.0 / max(1.0, self._rate)
         self._timer = self.create_timer(period, self._tick)
 
+        initial_source = "MANUAL" if self._takeover else "AUTONOMOUS"
+        next_source = "AUTONOMOUS" if self._takeover else "MANUAL"
         self.get_logger().info(
-            "manual_ctrl running (idle). Press X on the F710 to take over; "
-            "press X again to release."
+            f"manual_ctrl running. Initial source: {initial_source}; "
+            f"press X on the F710 to switch to {next_source}."
         )
 
     # ---------------------------------------------------------------------
@@ -169,10 +171,10 @@ class ManualControlNode(Node):
 
     def destroy_node(self) -> bool:
         try:
-            # Best effort: stop the car and release on shutdown.
+            # Best effort: stop the car. Do not release takeover here: if this
+            # node crashes while the mux remains alive, keeping manual selected
+            # lets the mux watchdog hold zero instead of exposing autonomy.
             self._motor_pub.publish(Float64(data=0.0))
-            self._takeover = False
-            self._publish_takeover()
         except Exception:  # noqa: BLE001
             pass
         try:

@@ -32,6 +32,7 @@ class ManualMuxNode(Node):
         self.declare_parameter("manual_motor_topic", "/manual/motor")
         self.declare_parameter("manual_servo_topic", "/manual/servo")
         self.declare_parameter("takeover_topic", "/manual/takeover")
+        self.declare_parameter("initial_takeover", True)
 
         # Output: the real VESC command topics.
         self.declare_parameter("motor_out_topic", "/commands/motor/speed")
@@ -45,7 +46,7 @@ class ManualMuxNode(Node):
         self._timeout = float(g("command_timeout").value)
         self._servo_center = float(g("servo_center").value)
 
-        self._takeover = False
+        self._takeover = bool(g("initial_takeover").value)
         self._last_motor_stamp = self.get_clock().now()
 
         # --- outputs ------------------------------------------------------
@@ -78,8 +79,9 @@ class ManualMuxNode(Node):
 
         self._watchdog = self.create_timer(0.05, self._check_watchdog)
 
+        initial_source = "MANUAL" if self._takeover else "AUTONOMOUS"
         self.get_logger().info(
-            "manual_mux running. Forwarding AUTONOMOUS until takeover.")
+            f"manual_mux running. Initial source: {initial_source}.")
 
     # --- takeover ---------------------------------------------------------
     def _takeover_cb(self, msg: Bool) -> None:

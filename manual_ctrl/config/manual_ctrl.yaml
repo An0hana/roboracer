@@ -25,6 +25,8 @@ manual_ctrl:
     manual_motor_topic: "/manual/motor"
     manual_servo_topic: "/manual/servo"
     takeover_topic: "/manual/takeover"
+    # Start parked in manual mode. The first X press releases to autonomy.
+    initial_takeover: true
 
 manual_mux:
   ros__parameters:
@@ -33,6 +35,9 @@ manual_mux:
     manual_motor_topic: "/manual/motor"
     manual_servo_topic: "/manual/servo"
     takeover_topic: "/manual/takeover"
+    # Keep this equal to manual_ctrl.initial_takeover. Setting it here too
+    # prevents a brief autonomous-output window while nodes are starting.
+    initial_takeover: true
 
     # The real VESC command topics. Nothing else should publish here.
     motor_out_topic: "/commands/motor/speed"
