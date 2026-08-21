@@ -86,8 +86,10 @@ TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.
 
 -- Smaller active graph means a re-solve has less freedom to move the whole
 -- trajectory at once.
+-- Reverted to the original 3. Fewer submaps means less overlap with the frozen
+-- map and weaker constraints, which is the opposite of what is needed here.
 TRAJECTORY_BUILDER.pure_localization_trimmer = {
-  max_submaps_to_keep = 2,
+  max_submaps_to_keep = 3,
 }
 
 -- NOTE: initial_trajectory_pose does NOT belong here.
@@ -111,12 +113,18 @@ TRAJECTORY_BUILDER.pure_localization_trimmer = {
 POSE_GRAPH.global_sampling_ratio = 0.0
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.85
 
--- CORRECTION to earlier advice: sampling_ratio was briefly raised to 0.3.
--- That is 6x more constraint attempts, which on this track means more chances
--- to land a wrong one. Back down. 0.1 still gives the graph plenty to work
--- with while keeping the local matcher, not the graph, in charge.
-POSE_GRAPH.constraint_builder.sampling_ratio = 0.1
-POSE_GRAPH.constraint_builder.max_constraint_distance = 6.0
+-- max_constraint_distance: KEEP THIS SMALL. This track is a serpentine whose
+-- parallel corridors sit roughly 1.5-2 m apart, and parallel barrier corridors
+-- look nearly identical to a 2D lidar. At 6.0 m the constraint builder
+-- considers submaps one to three corridors over and false constraints follow;
+-- raising it from the original 1.0 made the flip markedly worse on the car.
+-- 1.5 m is a geometric prior that makes cross-corridor matching impossible
+-- while still allowing constraints to the submap the car is actually in.
+POSE_GRAPH.constraint_builder.max_constraint_distance = 1.5
+
+-- sampling_ratio: more attempts means more chances to land a wrong one. The
+-- original 0.05 is fine; 0.1 is the most this should ever be.
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.05
 POSE_GRAPH.constraint_builder.min_score = 0.75
 
 -- Bounds how far any single local constraint can move the solution. A 0.6 m

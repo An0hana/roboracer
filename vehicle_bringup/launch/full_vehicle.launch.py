@@ -245,7 +245,7 @@ def generate_launch_description():
     )
     localization = include_python(
         "robo_cartographer",
-        "amcl_localization.launch.py",
+        "localization.launch.py",
         {
             "map": map_yaml,
             "params_file": amcl_config,

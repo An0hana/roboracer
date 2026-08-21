@@ -26,62 +26,42 @@ starts, and there is exactly one supported way to do that:
 This launch file makes that call itself, on a timer after the node is up, so it
 cannot be forgotten. Set the grid position via start_x/start_y/start_yaw.
 
-DUPLICATE NODES
----------------
-launch_pose_odom defaults to false because the main bringup already starts
-pose_odom. Two instances publish to /state_estimation/odom independently, each
-with its own gate state, and the controller sees them interleaved. Set it true
-only when running this launch file standalone.
+POSE_ODOM OWNERSHIP
+-------------------
+launch_pose_odom defaults to TRUE. vehicle_bringup includes this file at its
+Stage 2 and expects it to own the single pose_odom instance, so this file must
+start it. Set false only if some other launch file in your tree starts
+pose_odom -- two instances publish to /state_estimation/odom independently,
+each with its own gate state, and the controller sees them interleaved.
+
+ARGUMENTS FROM vehicle_bringup
+------------------------------
+vehicle_bringup passes map, params_file and pose_odom_params because the same
+include also drives amcl_localization.launch.py. Only pose_odom_params is used
+here; map and params_file are declared so they are accepted and ignored rather
+than silently dropped.
+
+It does NOT pass pbstream, so `pbstream:=...` on the vehicle_bringup command
+line goes nowhere and the default below is what gets loaded. To make that
+argument work, add to vehicle_bringup:
+    DeclareLaunchArgument("pbstream", default_value="<path>.pbstream")
+and forward it in the localization include:
+    {"pbstream": LaunchConfiguration("pbstream"), ...}
 """
 
-import math
 import os
 
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
-                            LogInfo, OpaqueFunction,
-                            RegisterEventHandler, TimerAction)
+from launch.actions import (DeclareLaunchArgument, RegisterEventHandler,
+                            TimerAction)
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessStart
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
 from launch_ros.actions import Node
-
-
-def _start_trajectory(context, *args, **kwargs):
-    """Build and issue the /start_trajectory request from launch arguments."""
-    del args, kwargs
-
-    config_dir = os.path.join(
-        get_package_share_directory("robo_cartographer"), "config")
-
-    x = float(LaunchConfiguration("start_x").perform(context))
-    y = float(LaunchConfiguration("start_y").perform(context))
-    yaw = float(LaunchConfiguration("start_yaw").perform(context))
-
-    # Planar, so only the z/w quaternion components are non-trivial.
-    qz = math.sin(0.5 * yaw)
-    qw = math.cos(0.5 * yaw)
-
-    request = (
-        "{{configuration_directory: '{cfg}', "
-        "configuration_basename: 'my_car_localization.lua', "
-        "use_initial_pose: true, "
-        "initial_pose: {{position: {{x: {x}, y: {y}, z: 0.0}}, "
-        "orientation: {{x: 0.0, y: 0.0, z: {qz}, w: {qw}}}}}, "
-        "relative_to_trajectory_id: 0}}"
-    ).format(cfg=config_dir, x=x, y=y, qz=qz, qw=qw)
-
-    return [
-        LogInfo(msg="[localization] starting trajectory at "
-                    "x={:.3f} y={:.3f} yaw={:.3f} rad".format(x, y, yaw)),
-        ExecuteProcess(
-            cmd=["ros2", "service", "call", "/start_trajectory",
-                 "cartographer_ros_msgs/srv/StartTrajectory", request],
-            output="screen",
-        ),
-    ]
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -102,18 +82,37 @@ def generate_launch_description():
         DeclareLaunchArgument("start_yaw", default_value="-0.133"),
         DeclareLaunchArgument(
             "start_delay",
-            default_value="4.0",
+            default_value="2.0",
             description="Seconds to wait after the node starts before calling "
-                        "/start_trajectory. Loading a large .pbstream takes a "
-                        "while; the call fails if it arrives too early.",
+                        "/start_trajectory. The client also waits for the "
+                        "service itself, so this only needs to be small.",
         ),
+        # TRUE by default: vehicle_bringup includes this file and expects it
+        # to own the single pose_odom instance ("amcl_localization.launch.py
+        # owns the only pose_odom instance so map->odom and odom->base_link
+        # each have exactly one publisher"). Defaulting this to false meant no
+        # pose_odom started at all, /state_estimation/odom was never published,
+        # and every downstream node reported state_age=inf.
+        # Set false ONLY if something else in your tree starts pose_odom.
         DeclareLaunchArgument(
             "launch_pose_odom",
-            default_value="false",
-            description="Start pose_odom here. Leave false if the main bringup "
-                        "already starts it -- two instances fight over "
-                        "/state_estimation/odom.",
+            default_value="true",
+            description="Start pose_odom here. Set false only if another "
+                        "launch file already starts it -- two instances fight "
+                        "over /state_estimation/odom.",
         ),
+        # Config path for pose_odom. vehicle_bringup passes this through.
+        DeclareLaunchArgument(
+            "pose_odom_params",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("pose_odom"), "config", "pose_odom.yaml"]),
+            description="pose_odom parameter file.",
+        ),
+        # Accepted and ignored. vehicle_bringup passes these because it also
+        # drives amcl_localization.launch.py; declaring them here keeps the
+        # same include working for both without editing the bringup.
+        DeclareLaunchArgument("map", default_value=""),
+        DeclareLaunchArgument("params_file", default_value=""),
     ]
 
     cartographer_node = Node(
@@ -138,13 +137,36 @@ def generate_launch_description():
         ],
     )
 
+    # A real service client, not ExecuteProcess(["ros2", "service", "call"]).
+    # Shelling out failed silently: `ros2` is not guaranteed to be on the
+    # launch subprocess PATH, and a non-zero exit is not surfaced anywhere, so
+    # the trajectory never started and every node reported state_age=inf.
+    # This node waits for the service, retries, refuses to create a second
+    # active trajectory, and logs the actual status code on failure.
     start_trajectory = RegisterEventHandler(
         OnProcessStart(
             target_action=cartographer_node,
             on_start=[
                 TimerAction(
                     period=LaunchConfiguration("start_delay"),
-                    actions=[OpaqueFunction(function=_start_trajectory)],
+                    actions=[Node(
+                        package="robo_cartographer",
+                        executable="start_trajectory.py",
+                        name="start_trajectory_client",
+                        output="screen",
+                        parameters=[{
+                            "configuration_directory": config_dir,
+                            "configuration_basename":
+                                "my_car_localization.lua",
+                            "start_x": ParameterValue(
+                                LaunchConfiguration("start_x"), value_type=float),
+                            "start_y": ParameterValue(
+                                LaunchConfiguration("start_y"), value_type=float),
+                            "start_yaw": ParameterValue(
+                                LaunchConfiguration("start_yaw"), value_type=float),
+                            "relative_to_trajectory_id": 0,
+                        }],
+                    )],
                 )
             ],
         )
@@ -168,10 +190,11 @@ def generate_launch_description():
         output="screen",
         condition=IfCondition(LaunchConfiguration("launch_pose_odom")),
         parameters=[
-            os.path.join(
-                get_package_share_directory("pose_odom"),
-                "config", "pose_odom.yaml"),
+            LaunchConfiguration("pose_odom_params"),
             {
+                # Cartographer owns odom->base_link here
+                # (provide_odom_frame = true), so pose_odom must not also
+                # publish that edge.
                 "publish_odom_tf": False,
                 "map_pose_source": "tracked_pose",
             },
