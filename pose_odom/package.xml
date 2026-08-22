@@ -2,12 +2,12 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>pose_odom</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>
-    Odometry from Cartographer tracked_pose (position and orientation) fused
-    with VESC motor RPM (speed). Motor RPM is the primary speed source; the
-    tracked_pose derivative supplies a slow scale correction and direction
-    fallback when signed motor telemetry is unavailable.
+    Continuous controller state for the vehicle. Cartographer's map pose is
+    gated against dead reckoning (VESC ERPM speed + bias-corrected IMU gyro) so
+    a pose-graph jump cannot reach the controller. Also publishes a pure
+    dead-reckoned odom frame, which is what AMCL needs in order to run.
   </description>
   <maintainer email="seeed@todo.todo">seeed</maintainer>
   <license>MIT</license>
@@ -17,11 +17,18 @@
   <depend>rclcpp</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
   <depend>vesc_msgs</depend>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

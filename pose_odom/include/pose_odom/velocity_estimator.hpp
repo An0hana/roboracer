@@ -1,5 +1,18 @@
 #pragma once
 
+// Fuses motor-RPM speed with tracked-pose derivatives. No ROS types.
+//
+// CHANGE FROM THE PREVIOUS VERSION
+// --------------------------------
+// yawRate() used to be differentiated from /tracked_pose. That made the yaw
+// rate a function of the very signal the pose gate is trying to validate: when
+// Cartographer flipped, the reported yaw rate flipped with it, so there was no
+// independent estimate to coast on. The gyro is now the primary yaw-rate
+// source, with the pose derivative kept only as a fallback when no IMU is
+// present. Bias correction lives in DeadReckoner (pose_filter.hpp), which owns
+// the stationary-bias estimate; feed the corrected value in via
+// updateGyroYawRate().
+
 #include <cmath>
 
 namespace pose_odom
@@ -29,7 +42,7 @@ struct VelocityParams
     // Complementary fusion. Magnitude is mostly from RPM (low noise);
     // pose derivative supplies a slow correction for RPM scale error.
     //   speed_magnitude = (1 - pose_weight)*|v_rpm| + pose_weight*|v_pose_lp|
-    double pose_weight{0.15};
+    double pose_weight{0.0};
 
     // Low-pass smoothing factors in [0,1]; larger = more responsive, noisier.
     double pose_speed_alpha{0.15};
@@ -45,9 +58,12 @@ struct VelocityParams
 
     // Ignore pose samples further apart than this [s] (e.g. after a stall).
     double max_pose_dt{0.5};
+
+    // Prefer the gyro for yaw rate. Falls back to the pose derivative
+    // automatically if no gyro sample has ever arrived.
+    bool prefer_gyro_yaw_rate{true};
 };
 
-/// Fuses motor-RPM speed with tracked-pose derivatives. No ROS types.
 class VelocityEstimator
 {
 public:
@@ -76,6 +92,13 @@ public:
             direction_ = 0;
         }
         have_rpm_ = true;
+    }
+
+    /// Feed a bias-corrected, REP-103 signed yaw rate [rad/s] from the IMU.
+    void updateGyroYawRate(double wz)
+    {
+        gyro_yaw_rate_ = wz;
+        have_gyro_ = true;
     }
 
     /// Feed a map-frame pose sample with its timestamp [s].
@@ -111,9 +134,6 @@ public:
     /// Fused signed ground speed [m/s].
     double speed() const
     {
-        // Motor telemetry is the primary speed source. If it explicitly says
-        // the wheels are stationary, do not let differentiated localization
-        // jitter manufacture forward or reverse motion.
         if (have_rpm_ && std::abs(v_rpm_) <= params_.speed_deadband)
         {
             return 0.0;
@@ -127,23 +147,29 @@ public:
             return 0.0;
         }
 
-        // This vehicle's VESC reports signed ERPM reliably while moving.
-        // Localization derivatives can briefly flip during scan corrections,
-        // so they must not override the measured wheel direction.
         int dir = have_rpm_ ? sgn(v_rpm_) : direction_;
         if (dir == 0) { dir = (direction_ != 0) ? direction_ : 1; }
         return dir * mag;
     }
 
-    double yawRate()   const { return yaw_rate_lp_; }
-    double rpmSpeed()  const { return v_rpm_; }
-    double poseSpeed() const { return v_pose_lp_; }
-    bool   ready()     const { return have_rpm_ || have_pose_; }
+    /// Yaw rate [rad/s]. Gyro when available, pose derivative otherwise.
+    double yawRate() const
+    {
+        if (params_.prefer_gyro_yaw_rate && have_gyro_) { return gyro_yaw_rate_; }
+        return yaw_rate_lp_;
+    }
+
+    double rpmSpeed()      const { return v_rpm_; }
+    double poseSpeed()     const { return v_pose_lp_; }
+    double poseYawRate()   const { return yaw_rate_lp_; }
+    bool   haveGyro()      const { return have_gyro_; }
+    bool   haveRpm()       const { return have_rpm_; }
+    bool   ready()         const { return have_rpm_ || have_pose_; }
 
     void reset()
     {
-        v_rpm_ = v_pose_lp_ = yaw_rate_lp_ = 0.0;
-        have_rpm_ = have_pose_ = false;
+        v_rpm_ = v_pose_lp_ = yaw_rate_lp_ = gyro_yaw_rate_ = 0.0;
+        have_rpm_ = have_pose_ = have_gyro_ = false;
         direction_ = 0;
     }
 
@@ -153,10 +179,12 @@ private:
     double v_rpm_{0.0};
     double v_pose_lp_{0.0};
     double yaw_rate_lp_{0.0};
+    double gyro_yaw_rate_{0.0};
 
     double last_x_{0.0}, last_y_{0.0}, last_yaw_{0.0}, last_t_{0.0};
     bool   have_rpm_{false};
     bool   have_pose_{false};
+    bool   have_gyro_{false};
     int    direction_{0};
 };
 
